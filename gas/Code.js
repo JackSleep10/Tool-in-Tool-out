@@ -20,6 +20,11 @@ function doPost(e) {
   return handleRequest(e);
 }
 
+// Actions that modify the spreadsheet. These run under a script lock so that
+// concurrent requests can never write to the same row or double-borrow a tool.
+const WRITE_ACTIONS = ['BORROW', 'RETURN', 'BATCH_TRANSACTIONS', 'MARK_UNSERVICEABLE', 'MARK_SERVICEABLE'];
+const LOCK_TIMEOUT_MS = 20000;
+
 function handleRequest(e) {
   // Note: Google Apps Script handles CORS automatically for Web Apps
 
@@ -29,7 +34,8 @@ function handleRequest(e) {
   }
 
   var result = { status: 'success', data: null };
-  
+  var lock = null;
+
   try {
     // Parse Payload
     var action = e.parameter.action;
@@ -40,7 +46,17 @@ function handleRequest(e) {
       payload = data;
     }
 
+    if (WRITE_ACTIONS.indexOf(action) !== -1) {
+      lock = LockService.getScriptLock();
+      if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+        throw new Error('ระบบกำลังบันทึกรายการอื่นอยู่ กรุณาลองใหม่อีกครั้ง');
+      }
+    }
+
     // Router
+    // NOTE: RUN_TOOL_MIGRATION was intentionally removed from the public API.
+    // runToolMigration() clears the Tools sheet, so it must only be run
+    // manually from the Apps Script editor.
     switch (action) {
       case 'GET_ALL_DATA':
         result.data = getAllData(payload);
@@ -66,17 +82,19 @@ function handleRequest(e) {
       case 'MARK_SERVICEABLE':
         result.data = markToolServiceability(payload, 'SERVICEABLE');
         break;
-      case 'RUN_TOOL_MIGRATION':
-        result.data = runToolMigration();
-        break;
       default:
         result.status = 'error';
         result.message = 'Unknown action: ' + action;
     }
 
+    if (lock) SpreadsheetApp.flush();
+
   } catch (err) {
     result.status = 'error';
-    result.message = err.toString();
+    result.data = null;
+    result.message = (err && err.message) ? err.message : String(err);
+  } finally {
+    if (lock) lock.releaseLock();
   }
 
   // Return JSON
@@ -96,6 +114,50 @@ function getSpreadsheet() {
   }
 }
 
+// Normalize IDs so that 'TLR-001', ' tlr-001 ' and numeric IDs compare consistently.
+function normalizeId(value) {
+  return (value === null || value === undefined ? '' : value).toString().trim().toLowerCase();
+}
+
+// Prevent spreadsheet formula injection (values starting with = + @ or - followed
+// by text are interpreted as formulas by Google Sheets; plain '-' is kept as-is).
+function sanitizeCell(value) {
+  if (typeof value === 'string' && /^(?:[=+@]|-(?!$))/.test(value)) {
+    return "'" + value;
+  }
+  return value;
+}
+
+/**
+ * Replay transactions in order (FIFO) and return the list of BORROW records
+ * that have not been returned yet, plus a map of RETURN id -> matched BORROW id.
+ */
+function computeOutstanding(allTx) {
+  const outstandingList = [];
+  const returnToBorrowMap = {};
+
+  for (let i = 0; i < allTx.length; i++) {
+    const tx = allTx[i];
+    if (tx.action === 'BORROW') {
+      outstandingList.push(tx);
+    } else if (tx.action === 'RETURN') {
+      const toolId = normalizeId(tx.tool_id);
+      const empId = normalizeId(tx.employee_id);
+      const idx = outstandingList.findIndex(function(item) {
+        return normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId;
+      });
+      if (idx !== -1) {
+        const matchedBorrow = outstandingList.splice(idx, 1)[0];
+        if (tx.id && matchedBorrow.id) {
+          returnToBorrowMap[tx.id] = matchedBorrow.id;
+        }
+      }
+    }
+  }
+
+  return { outstandingList: outstandingList, returnToBorrowMap: returnToBorrowMap };
+}
+
 function getAllData(payload) {
   const ss = getSpreadsheet();
   const employees = getSheetData(ss, 'Employees');
@@ -113,27 +175,9 @@ function getAllData(payload) {
   const allTx = getSheetData(ss, 'Transactions');
   
   // Replay FIFO to match returns with borrows
-  let outstandingList = [];
-  const returnToBorrowMap = {};
-
-  for (let i = 0; i < allTx.length; i++) {
-    const tx = allTx[i];
-    if (tx.action === 'BORROW') {
-      outstandingList.push(tx);
-    } else if (tx.action === 'RETURN') {
-      const toolId = (tx.tool_id || '').toString();
-      const empId = (tx.employee_id || '').toString();
-      const idx = outstandingList.findIndex(function(item) {
-        return (item.tool_id || '').toString() === toolId && (item.employee_id || '').toString() === empId;
-      });
-      if (idx !== -1) {
-        const matchedBorrow = outstandingList.splice(idx, 1)[0];
-        if (tx.id && matchedBorrow.id) {
-          returnToBorrowMap[tx.id] = matchedBorrow.id;
-        }
-      }
-    }
-  }
+  const replay = computeOutstanding(allTx);
+  const outstandingList = replay.outstandingList;
+  const returnToBorrowMap = replay.returnToBorrowMap;
 
   const outstandingIds = {};
   for (let j = 0; j < outstandingList.length; j++) {
@@ -202,57 +246,30 @@ function getSheetData(ss, sheetName) {
 }
 
 function addTransaction(data, type) {
-  const ss = getSpreadsheet();
-  
-  if (type === 'BORROW') {
-    const toolsSheet = ss.getSheetByName('Tools');
-    if (toolsSheet) {
-      const toolsData = toolsSheet.getDataRange().getValues();
-      const tHeaders = toolsData[0].map(h => h.toString().toLowerCase().trim());
-      const idCol = tHeaders.indexOf('id');
-      const statCol = tHeaders.indexOf('serviceability_status');
-      if (idCol !== -1 && statCol !== -1) {
-        const targetId = (data.tool_id || '').toString().toLowerCase().trim();
-        for (let i = 1; i < toolsData.length; i++) {
-          if ((toolsData[i][idCol] || '').toString().toLowerCase().trim() === targetId) {
-            if ((toolsData[i][statCol] || '').toString().toUpperCase().trim() === 'UNSERVICEABLE') {
-              return { status: 'error', message: 'อุปกรณ์ "' + (data.tool_name || data.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้' };
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  const sheet = ss.getSheetByName('Transactions');
-  
-  const newRow = [
-    Utilities.getUuid(), // id
-    new Date(),          // date
-    type,                // action
-    data.tool_id,
-    data.tool_name,
-    data.employee_id,
-    data.employee_name,
-    data.quantity || 1,
-    data.staff_issuer || '-',
-    data.staff_receiver || '-',
-    data.linked_borrow_id || '-',
-    data.remark || '-'
-  ];
-  
-  sheet.appendRow(newRow);
-  return { status: 'recorded', id: newRow[0] };
+  // Single transactions go through the same validated batch path.
+  const tx = Object.assign({}, data, { action: type });
+  const res = addBatchTransactions([tx]);
+  return { status: 'recorded', id: res.ids[0] };
 }
 
 function addBatchTransactions(transactions) {
-  if (!transactions || !transactions.length) return { status: 'error', message: 'No transactions' };
+  if (!transactions || !transactions.length) throw new Error('No transactions');
   
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName('Transactions');
+  if (!sheet) throw new Error('Transactions sheet not found');
   const results = [];
   const rows = [];
+
+  // Basic validation
+  for (let v = 0; v < transactions.length; v++) {
+    const t = transactions[v];
+    if (t.action !== 'BORROW' && t.action !== 'RETURN') {
+      throw new Error('Invalid action: ' + t.action);
+    }
+    if (!normalizeId(t.tool_id)) throw new Error('tool_id is required');
+    if (!normalizeId(t.employee_id)) throw new Error('employee_id is required');
+  }
   
   // Guard: Check if any BORROW item is UNSERVICEABLE
   const toolsSheet = ss.getSheetByName('Tools');
@@ -264,15 +281,41 @@ function addBatchTransactions(transactions) {
     if (idCol !== -1 && statCol !== -1) {
       const usMap = {};
       for (let i = 1; i < toolsData.length; i++) {
-        const tid = (toolsData[i][idCol] || '').toString().toLowerCase().trim();
+        const tid = normalizeId(toolsData[i][idCol]);
         const stat = (toolsData[i][statCol] || '').toString().toUpperCase().trim();
         if (stat === 'UNSERVICEABLE') usMap[tid] = true;
       }
       for (let j = 0; j < transactions.length; j++) {
         const t = transactions[j];
-        if (t.action === 'BORROW' && usMap[(t.tool_id || '').toString().toLowerCase().trim()]) {
-          return { status: 'error', message: 'อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้' };
+        if (t.action === 'BORROW' && usMap[normalizeId(t.tool_id)]) {
+          throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้');
         }
+      }
+    }
+  }
+
+  // Guard: a tool that is still borrowed cannot be borrowed again.
+  // Runs under the script lock (see handleRequest), so this check is race-free.
+  const hasBorrow = transactions.some(t => t.action === 'BORROW');
+  if (hasBorrow) {
+    const replay = computeOutstanding(getSheetData(ss, 'Transactions'));
+    const outByTool = {};
+    replay.outstandingList.forEach(function(b) {
+      outByTool[normalizeId(b.tool_id)] = b;
+    });
+    // Apply this batch in order so RETURN-then-BORROW in one batch is allowed.
+    for (let k = 0; k < transactions.length; k++) {
+      const t = transactions[k];
+      const key = normalizeId(t.tool_id);
+      if (t.action === 'RETURN') {
+        delete outByTool[key];
+      } else {
+        const existing = outByTool[key];
+        if (existing) {
+          throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" ถูกยืมอยู่แล้วโดย ' +
+            (existing.employee_name || '') + ' (' + (existing.employee_id || '') + ')');
+        }
+        outByTool[key] = t;
       }
     }
   }
@@ -283,15 +326,15 @@ function addBatchTransactions(transactions) {
       uuid,                // id
       new Date(),          // date
       data.action,         // action
-      data.tool_id,
-      data.tool_name,
-      data.employee_id,
-      data.employee_name,
+      sanitizeCell(data.tool_id),
+      sanitizeCell(data.tool_name),
+      sanitizeCell(data.employee_id),
+      sanitizeCell(data.employee_name),
       data.quantity || 1,
-      data.staff_issuer || '-',
-      data.staff_receiver || '-',
-      data.linked_borrow_id || '-',
-      data.remark || '-'
+      sanitizeCell(data.staff_issuer || '-'),
+      sanitizeCell(data.staff_receiver || '-'),
+      sanitizeCell(data.linked_borrow_id || '-'),
+      sanitizeCell(data.remark || '-')
     ];
     rows.push(newRow);
     results.push(uuid);
@@ -307,9 +350,9 @@ function addBatchTransactions(transactions) {
 function markToolServiceability(data, status, _retry) {
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName('Tools');
-  if (!sheet) return { status: 'error', message: 'Tools sheet not found' };
+  if (!sheet) throw new Error('Tools sheet not found');
 
-  if (!data.tool_id) return { status: 'error', message: 'tool_id is required' };
+  if (!data.tool_id) throw new Error('tool_id is required');
 
   const allData = sheet.getDataRange().getValues();
   const headers = allData[0].map(h => h.toString().toLowerCase());
@@ -321,11 +364,11 @@ function markToolServiceability(data, status, _retry) {
   const dateCol = headers.indexOf('unserviceable_date');
   const byCol = headers.indexOf('unserviceable_by');
 
-  if (idCol === -1) return { status: 'error', message: 'ID column not found' };
+  if (idCol === -1) throw new Error('ID column not found');
 
   // If serviceability columns don't exist yet, add them
   if (statusCol === -1) {
-    if (_retry) return { status: 'error', message: 'Failed to create serviceability columns' };
+    if (_retry) throw new Error('Failed to create serviceability columns');
     const lastCol = headers.length;
     sheet.getRange(1, lastCol + 1, 1, 4).setValues([['serviceability_status', 'unserviceable_reason', 'unserviceable_date', 'unserviceable_by']]);
     // Re-read headers after adding columns
@@ -334,23 +377,23 @@ function markToolServiceability(data, status, _retry) {
 
   // Ensure all serviceability columns exist
   if (reasonCol === -1 || dateCol === -1 || byCol === -1) {
-    return { status: 'error', message: 'Missing serviceability columns in Tools sheet' };
+    throw new Error('Missing serviceability columns in Tools sheet');
   }
 
   // Find the tool row
-  const toolId = (data.tool_id || '').toString().toLowerCase();
+  const toolId = normalizeId(data.tool_id);
   let rowIndex = -1;
   for (let i = 1; i < allData.length; i++) {
-    if (allData[i][idCol].toString().toLowerCase() === toolId) {
+    if (normalizeId(allData[i][idCol]) === toolId) {
       rowIndex = i + 1; // 1-indexed for sheet
       break;
     }
   }
 
-  if (rowIndex === -1) return { status: 'error', message: 'Tool not found: ' + data.tool_id };
+  if (rowIndex === -1) throw new Error('Tool not found: ' + data.tool_id);
 
   const values = status === 'UNSERVICEABLE'
-    ? ['UNSERVICEABLE', data.reason || '', new Date(), data.marked_by || '']
+    ? ['UNSERVICEABLE', sanitizeCell(data.reason || ''), new Date(), sanitizeCell(data.marked_by || '')]
     : ['SERVICEABLE', '', '', ''];
   sheet.getRange(rowIndex, statusCol + 1, 1, 4).setValues([values]);
 

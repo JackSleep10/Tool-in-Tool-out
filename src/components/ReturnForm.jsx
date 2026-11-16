@@ -13,6 +13,7 @@ const ReturnForm = () => {
     const [selectedIds, setSelectedIds] = useState([]);
     const [isScanning, setIsScanning] = useState(false);
     const [scanner, setScanner] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Modal State
     const [modal, setModal] = useState({
@@ -133,6 +134,7 @@ const ReturnForm = () => {
     };
 
     const handleReturnClick = (tx) => {
+        if (isSubmitting) return;
         if (!receiverName) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้รับคืน (Staff Receiver)');
             return;
@@ -148,6 +150,7 @@ const ReturnForm = () => {
     };
 
     const handleReturnSelected = () => {
+        if (isSubmitting) return;
         if (!receiverName) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้รับคืน (Staff Receiver)');
             return;
@@ -162,8 +165,10 @@ const ReturnForm = () => {
         );
     };
 
-    const processReturnBatch = (ids) => {
+    const processReturnBatch = async (ids) => {
+        if (isSubmitting) return;
         const txsToReturn = outstandingTransactions.filter(tx => ids.includes(tx.id));
+        if (txsToReturn.length === 0) return;
 
         const batchData = txsToReturn.map(tx => ({
             action: 'RETURN',
@@ -178,11 +183,17 @@ const ReturnForm = () => {
             remark: '-'
         }));
 
-        addBatchTransactions(batchData);
-
-        localStorage.setItem('staffReceiverName', receiverName);
-        setSelectedIds([]);
-        showModal('success', 'สำเร็จ', `ดำเนินการรับคืน ${ids.length} รายการเรียบร้อยแล้ว`);
+        setIsSubmitting(true);
+        try {
+            await addBatchTransactions(batchData);
+            localStorage.setItem('staffReceiverName', receiverName);
+            setSelectedIds([]);
+            showModal('success', 'สำเร็จ', `ดำเนินการรับคืน ${txsToReturn.length} รายการเรียบร้อยแล้ว`);
+        } catch (err) {
+            showModal('error', 'รับคืนไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     return (
@@ -254,9 +265,9 @@ const ReturnForm = () => {
                 {selectedIds.length > 0 && (
                     <div className="batch-action-bar">
                         <div className="selection-info">เลือกแล้ว {selectedIds.length} รายการ</div>
-                        <button className="batch-btn primary" onClick={handleReturnSelected}>
+                        <button className="batch-btn primary" onClick={handleReturnSelected} disabled={isSubmitting}>
                             <RotateCcw size={18} />
-                            รับคืนทั้งหมดที่เลือก
+                            {isSubmitting ? 'กำลังบันทึก...' : 'รับคืนทั้งหมดที่เลือก'}
                         </button>
                     </div>
                 )}
@@ -334,6 +345,7 @@ const ReturnForm = () => {
                                                     <button
                                                         className="inline-return-btn"
                                                         onClick={() => handleReturnClick(tx)}
+                                                        disabled={isSubmitting}
                                                     >
                                                         <RotateCcw size={14} />
                                                         คืน
@@ -383,6 +395,7 @@ const ReturnForm = () => {
                                                     e.stopPropagation();
                                                     handleReturnClick(tx);
                                                 }}
+                                                disabled={isSubmitting}
                                             >
                                                 <RotateCcw size={14} /> คืน
                                             </button>

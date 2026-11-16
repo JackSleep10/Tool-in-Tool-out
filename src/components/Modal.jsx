@@ -35,8 +35,9 @@ const Modal = ({ isOpen, onClose, title, message, type = 'info', onConfirm, conf
                     <button
                         className={`btn-primary ${type}`}
                         onClick={() => {
-                            if (onConfirm) onConfirm();
+                            const confirmCallback = onConfirm;
                             onClose();
+                            if (confirmCallback) confirmCallback();
                         }}
                     >
                         {confirmText}

@@ -14,11 +14,24 @@ export const fetchFromSheet = async (action, payload = {}) => {
         const response = await fetch(GOOGLE_SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify({ action, ...payload }),
-            // mode: 'no-cors' // Use 'cors' if simplified, but 'no-cors' is common for GAS
-            // However, for reading data we usually want CORS to work or use JSONP.
-            // Modern GAS Web Apps support CORS if returning TextOutput with proper headers.
         });
-        return await response.json();
+
+        if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (!result || result.status !== 'success') {
+            throw new Error(result?.message || 'เกิดข้อผิดพลาดในการติดต่อเซิร์ฟเวอร์');
+        }
+
+        // Guard against legacy nested error shape { status: 'success', data: { status: 'error', message } }
+        if (result.data && result.data.status === 'error') {
+            throw new Error(result.data.message || 'ไม่สามารถดำเนินการได้');
+        }
+
+        return result;
     } catch (error) {
         console.error('API Error:', error);
         throw error;

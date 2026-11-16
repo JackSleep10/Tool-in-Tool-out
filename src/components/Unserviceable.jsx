@@ -24,6 +24,7 @@ const Unserviceable = () => {
     const [toolSearch, setToolSearch] = useState('');
     const [isScanning, setIsScanning] = useState(false);
     const [scanner, setScanner] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     // General Modal Notification state
     const [modal, setModal] = useState({
@@ -56,8 +57,9 @@ const Unserviceable = () => {
         matchSearch(t, toolSearch, ['name', 'id', 'location'])
     ).slice(0, 30);
 
-    const handleMarkSubmit = (e) => {
+    const handleMarkSubmit = async (e) => {
         e.preventDefault();
+        if (isSubmitting) return;
         if (!selectedTool) {
             showModal('error', 'แจ้งเตือน', 'กรุณาเลือกอุปกรณ์ที่ต้องการแจ้งเสีย');
             return;
@@ -71,14 +73,20 @@ const Unserviceable = () => {
             return;
         }
 
-        // Simply process the action without double-confirmation
-        localStorage.setItem('staffIssuerName', markedBy);
-        markUnserviceable(selectedTool.id, reason, markedBy);
-        setIsFormOpen(false);
-        setSelectedTool(null);
-        setReason('');
-        setToolSearch('');
-        showModal('success', 'สำเร็จ', 'บันทึกอุปกรณ์ชำรุดเรียบร้อยแล้ว');
+        setIsSubmitting(true);
+        try {
+            await markUnserviceable(selectedTool.id, reason, markedBy);
+            localStorage.setItem('staffIssuerName', markedBy);
+            setIsFormOpen(false);
+            setSelectedTool(null);
+            setReason('');
+            setToolSearch('');
+            showModal('success', 'สำเร็จ', 'บันทึกอุปกรณ์ชำรุดเรียบร้อยแล้ว');
+        } catch (err) {
+            showModal('error', 'บันทึกไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const startScanning = async () => {
@@ -127,13 +135,22 @@ const Unserviceable = () => {
     };
 
     const handleRestoreClick = (tool) => {
+        if (isSubmitting) return;
         showModal(
             'confirm',
             'คืนสภาพพร้อมใช้งาน',
             `ต้องการคืนสภาพอุปกรณ์ "${tool.name || tool.id}" ให้พร้อมใช้งาน ใช่หรือไม่?`,
-            () => {
-                markServiceable(tool.id);
-                showModal('success', 'สำเร็จ', `อุปกรณ์ "${tool.name || tool.id}" เปลี่ยนสถานะเป็นพร้อมใช้งานแล้ว`);
+            async () => {
+                if (isSubmitting) return;
+                setIsSubmitting(true);
+                try {
+                    await markServiceable(tool.id);
+                    showModal('success', 'สำเร็จ', `อุปกรณ์ "${tool.name || tool.id}" เปลี่ยนสถานะเป็นพร้อมใช้งานแล้ว`);
+                } catch (err) {
+                    showModal('error', 'ดำเนินการไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
+                } finally {
+                    setIsSubmitting(false);
+                }
             }
         );
     };
@@ -212,6 +229,7 @@ const Unserviceable = () => {
                                                     <button
                                                         className="restore-btn"
                                                         onClick={() => handleRestoreClick(tool)}
+                                                        disabled={isSubmitting}
                                                         title="คืนสภาพพร้อมใช้งาน"
                                                     >
                                                         <RefreshCw size={14} />
@@ -241,6 +259,7 @@ const Unserviceable = () => {
                                                 <button
                                                     className="restore-btn m-restore-btn"
                                                     onClick={() => handleRestoreClick(tool)}
+                                                    disabled={isSubmitting}
                                                     title="คืนสภาพพร้อมใช้งาน"
                                                 >
                                                     <RefreshCw size={14} /> คืนสภาพ
@@ -405,8 +424,8 @@ const Unserviceable = () => {
                                 <button type="button" className="btn-secondary" onClick={() => setIsFormOpen(false)}>
                                     ยกเลิก
                                 </button>
-                                <button type="submit" className="btn-primary confirm-warning" disabled={!selectedTool}>
-                                    บันทึกแจ้งเสีย
+                                <button type="submit" className="btn-primary confirm-warning" disabled={!selectedTool || isSubmitting}>
+                                    {isSubmitting ? 'กำลังบันทึก...' : 'บันทึกแจ้งเสีย'}
                                 </button>
                             </div>
                         </form>

@@ -7036,11 +7036,18 @@ const fetchFromSheet = async (action, payload = {}) => {
     const response = await fetch(GOOGLE_SCRIPT_URL, {
       method: "POST",
       body: JSON.stringify({ action, ...payload })
-      // mode: 'no-cors' // Use 'cors' if simplified, but 'no-cors' is common for GAS
-      // However, for reading data we usually want CORS to work or use JSONP.
-      // Modern GAS Web Apps support CORS if returning TextOutput with proper headers.
     });
-    return await response.json();
+    if (!response.ok) {
+      throw new Error(`HTTP error ${response.status}`);
+    }
+    const result = await response.json();
+    if (!result || result.status !== "success") {
+      throw new Error((result == null ? void 0 : result.message) || "เกิดข้อผิดพลาดในการติดต่อเซิร์ฟเวอร์");
+    }
+    if (result.data && result.data.status === "error") {
+      throw new Error(result.data.message || "ไม่สามารถดำเนินการได้");
+    }
+    return result;
   } catch (error) {
     console.error("API Error:", error);
     throw error;
@@ -7193,38 +7200,49 @@ const StoreProvider = ({ children }) => {
     setTransactions((prev) => [...prev, optimisticTx]);
     try {
       const result = await fetchFromSheet(transactionData.action, transactionData);
-      if (result && result.status === "success") {
-        loadData(true);
-      }
+      await loadData(true);
+      return result.data;
     } catch (e) {
+      setTransactions((prev) => prev.filter((tx) => tx.id !== tempId));
       console.error("Network Error", e);
+      throw e;
     }
   };
   const addBatchTransactions = async (transactionsArray) => {
-    if (!transactionsArray || transactionsArray.length === 0) return;
+    if (!transactionsArray || transactionsArray.length === 0) return null;
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const optimisticTxs = transactionsArray.map((tx, index) => ({
-      ...tx,
-      id: `temp_${Date.now()}_${index}`,
-      date: now,
-      status: "PENDING_SERVER"
-    }));
+    const batchNonce = Date.now();
+    const tempIds = /* @__PURE__ */ new Set();
+    const optimisticTxs = transactionsArray.map((tx, index) => {
+      const tempId = `temp_${batchNonce}_${index}`;
+      tempIds.add(tempId);
+      return {
+        ...tx,
+        id: tempId,
+        date: now,
+        status: "PENDING_SERVER"
+      };
+    });
     setTransactions((prev) => [...prev, ...optimisticTxs]);
     try {
       const result = await fetchFromSheet("BATCH_TRANSACTIONS", {
         transactions: transactionsArray
       });
-      if (result && result.status === "success") {
-        loadData(true);
-      }
+      await loadData(true);
+      return result.data;
     } catch (e) {
+      setTransactions((prev) => prev.filter((tx) => !tempIds.has(tx.id)));
       console.error("Batch Network Error", e);
+      throw e;
     }
   };
   const markUnserviceable = async (toolId, reason, markedBy) => {
+    let previousTool = null;
+    const targetId = toolId == null ? void 0 : toolId.toString().toLowerCase();
     setTools((prev) => prev.map((t2) => {
       var _a;
-      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === (toolId == null ? void 0 : toolId.toString().toLowerCase())) {
+      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === targetId) {
+        previousTool = t2;
         return {
           ...t2,
           serviceability_status: "UNSERVICEABLE",
@@ -7241,17 +7259,23 @@ const StoreProvider = ({ children }) => {
         reason,
         marked_by: markedBy
       });
-      if (result && result.status === "success") {
-        loadData(true);
-      }
+      await loadData(true);
+      return result.data;
     } catch (e) {
+      if (previousTool) {
+        setTools((prev) => prev.map((t2) => t2.id === previousTool.id ? previousTool : t2));
+      }
       console.error("Error marking unserviceable:", e);
+      throw e;
     }
   };
   const markServiceable = async (toolId) => {
+    let previousTool = null;
+    const targetId = toolId == null ? void 0 : toolId.toString().toLowerCase();
     setTools((prev) => prev.map((t2) => {
       var _a;
-      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === (toolId == null ? void 0 : toolId.toString().toLowerCase())) {
+      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === targetId) {
+        previousTool = t2;
         return {
           ...t2,
           serviceability_status: "SERVICEABLE",
@@ -7266,11 +7290,14 @@ const StoreProvider = ({ children }) => {
       const result = await fetchFromSheet("MARK_SERVICEABLE", {
         tool_id: toolId
       });
-      if (result && result.status === "success") {
-        loadData(true);
-      }
+      await loadData(true);
+      return result.data;
     } catch (e) {
+      if (previousTool) {
+        setTools((prev) => prev.map((t2) => t2.id === previousTool.id ? previousTool : t2));
+      }
       console.error("Error marking serviceable:", e);
+      throw e;
     }
   };
   const getStats = () => {
@@ -36104,8 +36131,9 @@ const Modal = ({ isOpen, onClose, title, message, type = "info", onConfirm, conf
         {
           className: `btn-primary ${type}`,
           onClick: () => {
-            if (onConfirm) onConfirm();
+            const confirmCallback = onConfirm;
             onClose();
+            if (confirmCallback) confirmCallback();
           },
           children: confirmText
         }
@@ -36123,6 +36151,7 @@ const BorrowForm = () => {
   const [toolSearch, setToolSearch] = reactExports.useState("");
   const [isScanning, setIsScanning] = reactExports.useState(false);
   const [scanner, setScanner] = reactExports.useState(null);
+  const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
     type: "info",
@@ -36169,21 +36198,30 @@ const BorrowForm = () => {
         "confirm",
         "อุปกรณ์ยังไม่ได้คืน",
         `"${tool.name}" อยู่กับ ${borrower.employee_name} (${borrower.employee_id}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
-        () => {
-          addBatchTransactions([{
-            action: "RETURN",
-            tool_id: tool.id,
-            tool_name: tool.name,
-            employee_id: borrower.employee_id,
-            employee_name: borrower.employee_name,
-            quantity: 1,
-            staff_issuer: borrower.staff_issuer,
-            staff_receiver: "Auto-Return",
-            linked_borrow_id: borrower.id,
-            remark: "คืนอัตโนมัติเพื่อยืมต่อ"
-          }]);
-          setBasket((prev) => [...prev, tool]);
-          setToolSearch("");
+        async () => {
+          if (isSubmitting) return;
+          setIsSubmitting(true);
+          try {
+            await addBatchTransactions([{
+              action: "RETURN",
+              tool_id: tool.id,
+              tool_name: tool.name,
+              employee_id: borrower.employee_id,
+              employee_name: borrower.employee_name,
+              quantity: 1,
+              staff_issuer: borrower.staff_issuer,
+              staff_receiver: "Auto-Return",
+              linked_borrow_id: borrower.id,
+              remark: "คืนอัตโนมัติเพื่อยืมต่อ"
+            }]);
+            setBasket((prev) => [...prev, tool]);
+            setToolSearch("");
+            showModal("success", "รับคืนสำเร็จ", `รับคืน "${tool.name}" และเพิ่มลงในตะกร้าแล้ว`);
+          } catch (err) {
+            showModal("error", "รับคืนไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
+          } finally {
+            setIsSubmitting(false);
+          }
         }
       );
       return;
@@ -36262,6 +36300,7 @@ const BorrowForm = () => {
     setBasket(basket.filter((t2) => t2.id !== toolId));
   };
   const handleSubmit = () => {
+    if (isSubmitting) return;
     if (!selectedEmployee) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อพนักงานผู้ยืม");
       return;
@@ -36285,7 +36324,8 @@ const BorrowForm = () => {
       showModal("error", "พบปัญหาในการบันทึก", `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${borrower.employee_name} โปรดนำออกจากตะกร้าก่อนบันทึก`);
       return;
     }
-    showModal("confirm", "ยืนยันการทำรายการ", `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, () => {
+    showModal("confirm", "ยืนยันการทำรายการ", `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, async () => {
+      if (isSubmitting) return;
       const batchData = basket.map((tool) => ({
         action: "BORROW",
         tool_id: tool.id,
@@ -36297,13 +36337,20 @@ const BorrowForm = () => {
         staff_receiver: "-",
         remark
       }));
-      addBatchTransactions(batchData);
-      setBasket([]);
-      setSelectedEmployee(null);
-      setEmpSearch("");
-      setRemark("");
-      localStorage.setItem("staffIssuerName", issuerName);
-      showModal("success", "สำเร็จ", "บันทึกรายการยืมเรียบร้อยแล้ว");
+      setIsSubmitting(true);
+      try {
+        await addBatchTransactions(batchData);
+        setBasket([]);
+        setSelectedEmployee(null);
+        setEmpSearch("");
+        setRemark("");
+        localStorage.setItem("staffIssuerName", issuerName);
+        showModal("success", "สำเร็จ", "บันทึกรายการยืมเรียบร้อยแล้ว");
+      } catch (err) {
+        showModal("error", "บันทึกไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
+      } finally {
+        setIsSubmitting(false);
+      }
     });
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "borrow-container", children: [
@@ -36457,7 +36504,7 @@ const BorrowForm = () => {
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => removeFromBasket(item.id), className: "remove-btn", children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 16 }) })
         ] }, idx)) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "action-area", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "submit-btn", onClick: handleSubmit, children: "บันทึกการยืม" }) })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "action-area", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "submit-btn", onClick: handleSubmit, disabled: isSubmitting, children: isSubmitting ? "กำลังบันทึก..." : "บันทึกการยืม" }) })
       ] })
     ] })
   ] });
@@ -36469,6 +36516,7 @@ const ReturnForm = () => {
   const [selectedIds, setSelectedIds] = reactExports.useState([]);
   const [isScanning, setIsScanning] = reactExports.useState(false);
   const [scanner, setScanner] = reactExports.useState(null);
+  const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
     type: "info",
@@ -36574,6 +36622,7 @@ const ReturnForm = () => {
     }
   };
   const handleReturnClick = (tx) => {
+    if (isSubmitting) return;
     if (!receiverName) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้รับคืน (Staff Receiver)");
       return;
@@ -36588,6 +36637,7 @@ const ReturnForm = () => {
     );
   };
   const handleReturnSelected = () => {
+    if (isSubmitting) return;
     if (!receiverName) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้รับคืน (Staff Receiver)");
       return;
@@ -36600,8 +36650,10 @@ const ReturnForm = () => {
       () => processReturnBatch(selectedIds)
     );
   };
-  const processReturnBatch = (ids) => {
+  const processReturnBatch = async (ids) => {
+    if (isSubmitting) return;
     const txsToReturn = outstandingTransactions.filter((tx) => ids.includes(tx.id));
+    if (txsToReturn.length === 0) return;
     const batchData = txsToReturn.map((tx) => ({
       action: "RETURN",
       tool_id: tx.tool_id,
@@ -36614,10 +36666,17 @@ const ReturnForm = () => {
       linked_borrow_id: tx.id,
       remark: "-"
     }));
-    addBatchTransactions(batchData);
-    localStorage.setItem("staffReceiverName", receiverName);
-    setSelectedIds([]);
-    showModal("success", "สำเร็จ", `ดำเนินการรับคืน ${ids.length} รายการเรียบร้อยแล้ว`);
+    setIsSubmitting(true);
+    try {
+      await addBatchTransactions(batchData);
+      localStorage.setItem("staffReceiverName", receiverName);
+      setSelectedIds([]);
+      showModal("success", "สำเร็จ", `ดำเนินการรับคืน ${txsToReturn.length} รายการเรียบร้อยแล้ว`);
+    } catch (err) {
+      showModal("error", "รับคืนไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "return-container", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -36695,9 +36754,9 @@ const ReturnForm = () => {
           selectedIds.length,
           " รายการ"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "batch-btn primary", onClick: handleReturnSelected, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { className: "batch-btn primary", onClick: handleReturnSelected, disabled: isSubmitting, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(RotateCcw, { size: 18 }),
-          "รับคืนทั้งหมดที่เลือก"
+          isSubmitting ? "กำลังบันทึก..." : "รับคืนทั้งหมดที่เลือก"
         ] })
       ] })
     ] }),
@@ -36756,6 +36815,7 @@ const ReturnForm = () => {
                 {
                   className: "inline-return-btn",
                   onClick: () => handleReturnClick(tx),
+                  disabled: isSubmitting,
                   children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx(RotateCcw, { size: 14 }),
                     "คืน"
@@ -36802,6 +36862,7 @@ const ReturnForm = () => {
                         e.stopPropagation();
                         handleReturnClick(tx);
                       },
+                      disabled: isSubmitting,
                       children: [
                         /* @__PURE__ */ jsxRuntimeExports.jsx(RotateCcw, { size: 14 }),
                         " คืน"
@@ -38731,6 +38792,7 @@ const Unserviceable = () => {
   const [toolSearch, setToolSearch] = reactExports.useState("");
   const [isScanning, setIsScanning] = reactExports.useState(false);
   const [scanner, setScanner] = reactExports.useState(null);
+  const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
     type: "info",
@@ -38753,8 +38815,9 @@ const Unserviceable = () => {
   const filteredServiceableTools = serviceableTools.filter(
     (t2) => matchSearch(t2, toolSearch, ["name", "id", "location"])
   ).slice(0, 30);
-  const handleMarkSubmit = (e) => {
+  const handleMarkSubmit = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!selectedTool) {
       showModal("error", "แจ้งเตือน", "กรุณาเลือกอุปกรณ์ที่ต้องการแจ้งเสีย");
       return;
@@ -38767,13 +38830,20 @@ const Unserviceable = () => {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้แจ้ง");
       return;
     }
-    localStorage.setItem("staffIssuerName", markedBy);
-    markUnserviceable(selectedTool.id, reason, markedBy);
-    setIsFormOpen(false);
-    setSelectedTool(null);
-    setReason("");
-    setToolSearch("");
-    showModal("success", "สำเร็จ", "บันทึกอุปกรณ์ชำรุดเรียบร้อยแล้ว");
+    setIsSubmitting(true);
+    try {
+      await markUnserviceable(selectedTool.id, reason, markedBy);
+      localStorage.setItem("staffIssuerName", markedBy);
+      setIsFormOpen(false);
+      setSelectedTool(null);
+      setReason("");
+      setToolSearch("");
+      showModal("success", "สำเร็จ", "บันทึกอุปกรณ์ชำรุดเรียบร้อยแล้ว");
+    } catch (err) {
+      showModal("error", "บันทึกไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
   const startScanning = async () => {
     setIsScanning(true);
@@ -38819,13 +38889,22 @@ const Unserviceable = () => {
     }
   };
   const handleRestoreClick = (tool) => {
+    if (isSubmitting) return;
     showModal(
       "confirm",
       "คืนสภาพพร้อมใช้งาน",
       `ต้องการคืนสภาพอุปกรณ์ "${tool.name || tool.id}" ให้พร้อมใช้งาน ใช่หรือไม่?`,
-      () => {
-        markServiceable(tool.id);
-        showModal("success", "สำเร็จ", `อุปกรณ์ "${tool.name || tool.id}" เปลี่ยนสถานะเป็นพร้อมใช้งานแล้ว`);
+      async () => {
+        if (isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+          await markServiceable(tool.id);
+          showModal("success", "สำเร็จ", `อุปกรณ์ "${tool.name || tool.id}" เปลี่ยนสถานะเป็นพร้อมใช้งานแล้ว`);
+        } catch (err) {
+          showModal("error", "ดำเนินการไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
+        } finally {
+          setIsSubmitting(false);
+        }
       }
     );
   };
@@ -38887,6 +38966,7 @@ const Unserviceable = () => {
               {
                 className: "restore-btn",
                 onClick: () => handleRestoreClick(tool),
+                disabled: isSubmitting,
                 title: "คืนสภาพพร้อมใช้งาน",
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { size: 14 }),
@@ -38914,6 +38994,7 @@ const Unserviceable = () => {
                 {
                   className: "restore-btn m-restore-btn",
                   onClick: () => handleRestoreClick(tool),
+                  disabled: isSubmitting,
                   title: "คืนสภาพพร้อมใช้งาน",
                   children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { size: 14 }),
@@ -39072,7 +39153,7 @@ const Unserviceable = () => {
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-footer", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn-secondary", onClick: () => setIsFormOpen(false), children: "ยกเลิก" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "submit", className: "btn-primary confirm-warning", disabled: !selectedTool, children: "บันทึกแจ้งเสีย" })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "submit", className: "btn-primary confirm-warning", disabled: !selectedTool || isSubmitting, children: isSubmitting ? "กำลังบันทึก..." : "บันทึกแจ้งเสีย" })
         ] })
       ] })
     ] }) }),

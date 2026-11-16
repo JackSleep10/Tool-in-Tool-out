@@ -172,7 +172,6 @@ export const StoreProvider = ({ children }) => {
 
     // Actions
     const addTransaction = async (transactionData) => {
-        // Optimistic Update
         const tempId = `temp_${Date.now()}`;
         const optimisticTx = {
             ...transactionData,
@@ -185,25 +184,31 @@ export const StoreProvider = ({ children }) => {
 
         try {
             const result = await fetchFromSheet(transactionData.action, transactionData);
-            if (result && result.status === 'success') {
-                loadData(true);
-            }
+            await loadData(true);
+            return result.data;
         } catch (e) {
+            setTransactions(prev => prev.filter(tx => tx.id !== tempId));
             console.error('Network Error', e);
+            throw e;
         }
     };
 
     const addBatchTransactions = async (transactionsArray) => {
-        if (!transactionsArray || transactionsArray.length === 0) return;
+        if (!transactionsArray || transactionsArray.length === 0) return null;
 
-        // Optimistic Update - Add all as pending
         const now = new Date().toISOString();
-        const optimisticTxs = transactionsArray.map((tx, index) => ({
-            ...tx,
-            id: `temp_${Date.now()}_${index}`,
-            date: now,
-            status: 'PENDING_SERVER'
-        }));
+        const batchNonce = Date.now();
+        const tempIds = new Set();
+        const optimisticTxs = transactionsArray.map((tx, index) => {
+            const tempId = `temp_${batchNonce}_${index}`;
+            tempIds.add(tempId);
+            return {
+                ...tx,
+                id: tempId,
+                date: now,
+                status: 'PENDING_SERVER'
+            };
+        });
 
         setTransactions(prev => [...prev, ...optimisticTxs]);
 
@@ -211,17 +216,22 @@ export const StoreProvider = ({ children }) => {
             const result = await fetchFromSheet('BATCH_TRANSACTIONS', {
                 transactions: transactionsArray
             });
-            if (result && result.status === 'success') {
-                loadData(true);
-            }
+            await loadData(true);
+            return result.data;
         } catch (e) {
+            setTransactions(prev => prev.filter(tx => !tempIds.has(tx.id)));
             console.error('Batch Network Error', e);
+            throw e;
         }
     };
 
     const markUnserviceable = async (toolId, reason, markedBy) => {
+        let previousTool = null;
+        const targetId = toolId?.toString().toLowerCase();
+
         setTools(prev => prev.map(t => {
-            if (t.id?.toString().toLowerCase() === toolId?.toString().toLowerCase()) {
+            if (t.id?.toString().toLowerCase() === targetId) {
+                previousTool = t;
                 return {
                     ...t,
                     serviceability_status: 'UNSERVICEABLE',
@@ -239,17 +249,24 @@ export const StoreProvider = ({ children }) => {
                 reason: reason,
                 marked_by: markedBy
             });
-            if (result && result.status === 'success') {
-                loadData(true);
-            }
+            await loadData(true);
+            return result.data;
         } catch (e) {
+            if (previousTool) {
+                setTools(prev => prev.map(t => (t.id === previousTool.id ? previousTool : t)));
+            }
             console.error('Error marking unserviceable:', e);
+            throw e;
         }
     };
 
     const markServiceable = async (toolId) => {
+        let previousTool = null;
+        const targetId = toolId?.toString().toLowerCase();
+
         setTools(prev => prev.map(t => {
-            if (t.id?.toString().toLowerCase() === toolId?.toString().toLowerCase()) {
+            if (t.id?.toString().toLowerCase() === targetId) {
+                previousTool = t;
                 return {
                     ...t,
                     serviceability_status: 'SERVICEABLE',
@@ -265,11 +282,14 @@ export const StoreProvider = ({ children }) => {
             const result = await fetchFromSheet('MARK_SERVICEABLE', {
                 tool_id: toolId
             });
-            if (result && result.status === 'success') {
-                loadData(true);
-            }
+            await loadData(true);
+            return result.data;
         } catch (e) {
+            if (previousTool) {
+                setTools(prev => prev.map(t => (t.id === previousTool.id ? previousTool : t)));
+            }
             console.error('Error marking serviceable:', e);
+            throw e;
         }
     };
 

@@ -18,6 +18,7 @@ const BorrowForm = () => {
     const [toolSearch, setToolSearch] = useState('');
     const [isScanning, setIsScanning] = useState(false);
     const [scanner, setScanner] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Modal State
     const [modal, setModal] = useState({
@@ -81,24 +82,31 @@ const BorrowForm = () => {
                 'confirm',
                 'อุปกรณ์ยังไม่ได้คืน',
                 `"${tool.name}" อยู่กับ ${borrower.employee_name} (${borrower.employee_id}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
-                () => {
-                    // Perform Quick Return
-                    addBatchTransactions([{
-                        action: 'RETURN',
-                        tool_id: tool.id,
-                        tool_name: tool.name,
-                        employee_id: borrower.employee_id,
-                        employee_name: borrower.employee_name,
-                        quantity: 1,
-                        staff_issuer: borrower.staff_issuer,
-                        staff_receiver: 'Auto-Return',
-                        linked_borrow_id: borrower.id,
-                        remark: 'คืนอัตโนมัติเพื่อยืมต่อ'
-                    }]);
+                async () => {
+                    if (isSubmitting) return;
+                    setIsSubmitting(true);
+                    try {
+                        await addBatchTransactions([{
+                            action: 'RETURN',
+                            tool_id: tool.id,
+                            tool_name: tool.name,
+                            employee_id: borrower.employee_id,
+                            employee_name: borrower.employee_name,
+                            quantity: 1,
+                            staff_issuer: borrower.staff_issuer,
+                            staff_receiver: 'Auto-Return',
+                            linked_borrow_id: borrower.id,
+                            remark: 'คืนอัตโนมัติเพื่อยืมต่อ'
+                        }]);
 
-                    // Add to current basket
-                    setBasket(prev => [...prev, tool]);
-                    setToolSearch('');
+                        setBasket(prev => [...prev, tool]);
+                        setToolSearch('');
+                        showModal('success', 'รับคืนสำเร็จ', `รับคืน "${tool.name}" และเพิ่มลงในตะกร้าแล้ว`);
+                    } catch (err) {
+                        showModal('error', 'รับคืนไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
+                    } finally {
+                        setIsSubmitting(false);
+                    }
                 }
             );
             return;
@@ -190,6 +198,7 @@ const BorrowForm = () => {
     };
 
     const handleSubmit = () => {
+        if (isSubmitting) return;
         if (!selectedEmployee) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อพนักงานผู้ยืม');
             return;
@@ -219,7 +228,8 @@ const BorrowForm = () => {
         }
 
         // Confirm Action
-        showModal('confirm', 'ยืนยันการทำรายการ', `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, () => {
+        showModal('confirm', 'ยืนยันการทำรายการ', `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, async () => {
+            if (isSubmitting) return;
             const batchData = basket.map(tool => ({
                 action: 'BORROW',
                 tool_id: tool.id,
@@ -232,14 +242,20 @@ const BorrowForm = () => {
                 remark: remark
             }));
 
-            addBatchTransactions(batchData);
-
-            setBasket([]);
-            setSelectedEmployee(null);
-            setEmpSearch('');
-            setRemark(''); // Reset remark
-            localStorage.setItem('staffIssuerName', issuerName);
-            showModal('success', 'สำเร็จ', 'บันทึกรายการยืมเรียบร้อยแล้ว');
+            setIsSubmitting(true);
+            try {
+                await addBatchTransactions(batchData);
+                setBasket([]);
+                setSelectedEmployee(null);
+                setEmpSearch('');
+                setRemark('');
+                localStorage.setItem('staffIssuerName', issuerName);
+                showModal('success', 'สำเร็จ', 'บันทึกรายการยืมเรียบร้อยแล้ว');
+            } catch (err) {
+                showModal('error', 'บันทึกไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
+            } finally {
+                setIsSubmitting(false);
+            }
         });
     };
 
@@ -396,8 +412,8 @@ const BorrowForm = () => {
                     </div>
 
                     <div className="action-area">
-                        <button className="submit-btn" onClick={handleSubmit}>
-                            บันทึกการยืม
+                        <button className="submit-btn" onClick={handleSubmit} disabled={isSubmitting}>
+                            {isSubmitting ? 'กำลังบันทึก...' : 'บันทึกการยืม'}
                         </button>
                     </div>
                 </div>
