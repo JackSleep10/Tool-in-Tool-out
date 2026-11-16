@@ -1,8 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Search, RotateCcw, CheckSquare, Square, UserCheck, QrCode, X } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
+import { useModal } from '../hooks/useModal';
 import { normalizeId } from '../utils/transactions';
+import { matchSearch } from '../utils/tools';
 import { formatThaiDateTime } from '../utils/date';
 import Modal from './Modal';
 import './ReturnForm.css';
@@ -16,32 +18,22 @@ const ReturnForm = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+    const { modal, showModal, closeModal } = useModal();
 
-    // Modal State
-    const [modal, setModal] = useState({
-        isOpen: false,
-        type: 'info',
-        title: '',
-        message: '',
-        onConfirm: null
-    });
-
-    const showModal = (type, title, message, onConfirm = null) => {
-        setModal({ isOpen: true, type, title, message, onConfirm });
-    };
-
-    const closeModal = () => {
-        setModal(prev => ({ ...prev, isOpen: false }));
-    };
-
-    const filteredTransactions = useMemo(() => outstandingTransactions.filter(tx => {
-        if (!searchTerm || !searchTerm.trim()) return true;
-        const tokens = searchTerm.trim().toLowerCase().split(/\s+/);
-        const text = [
-            tx.tool_name, tx.tool_id, tx.employee_name, tx.employee_id, tx.staff_issuer, tx.remark
-        ].map(val => String(val ?? '').toLowerCase()).join(' ');
-        return tokens.every(token => text.includes(token));
-    }), [outstandingTransactions, searchTerm]);
+    const filteredTransactions = useMemo(
+        () =>
+            outstandingTransactions.filter((tx) =>
+                matchSearch(tx, searchTerm, [
+                    'tool_name',
+                    'tool_id',
+                    'employee_name',
+                    'employee_id',
+                    'staff_issuer',
+                    'remark'
+                ])
+            ),
+        [outstandingTransactions, searchTerm]
+    );
 
     // Selection Logic
     const toggleSelect = (id) => {
@@ -213,6 +205,7 @@ const ReturnForm = () => {
                                 className="scan-btn-inline"
                                 onClick={startScanning}
                                 title="สแกน QR Code"
+                                aria-label="เปิดกล้องสแกน QR Code เพื่อรับคืน"
                             >
                                 <QrCode size={18} />
                             </button>
@@ -225,7 +218,12 @@ const ReturnForm = () => {
                         <div className="scanner-container">
                             <div className="scanner-header">
                                 <h4>Scan Tool QR Code to Return</h4>
-                                <button type="button" onClick={() => stopScanning()} className="close-scanner">
+                                <button
+                                    type="button"
+                                    onClick={() => stopScanning()}
+                                    className="close-scanner"
+                                    aria-label="ปิดกล้องสแกน QR Code"
+                                >
                                     <X size={20} />
                                 </button>
                             </div>
@@ -238,7 +236,7 @@ const ReturnForm = () => {
                 {selectedIds.length > 0 && (
                     <div className="batch-action-bar">
                         <div className="selection-info">เลือกแล้ว {selectedIds.length} รายการ</div>
-                        <button className="batch-btn primary" onClick={handleReturnSelected} disabled={isSubmitting}>
+                        <button type="button" className="batch-btn primary" onClick={handleReturnSelected} disabled={isSubmitting}>
                             <RotateCcw size={18} />
                             {isSubmitting ? 'กำลังบันทึก...' : 'รับคืนทั้งหมดที่เลือก'}
                         </button>
@@ -250,7 +248,7 @@ const ReturnForm = () => {
                 <div className="list-card-header">
                     <h3>รายการค้างส่งทั้งหมด ({outstandingTransactions.length})</h3>
                     {filteredTransactions.length > 0 && (
-                        <button className="text-action-btn" onClick={toggleSelectAll}>
+                        <button type="button" className="text-action-btn" onClick={toggleSelectAll}>
                             {selectedIds.length === filteredTransactions.length ? <CheckSquare size={18} /> : <Square size={18} />}
                             {selectedIds.length === filteredTransactions.length ? 'ยกเลิกทั้งหมด' : 'เลือกทั้งหมด'}
                         </button>
@@ -277,15 +275,28 @@ const ReturnForm = () => {
                                         <td colSpan="6" className="empty-state">ไม่พบรายการที่ตรงกับการค้นหา</td>
                                     </tr>
                                 ) : (
-                                    filteredTransactions.map(tx => {
+                                    filteredTransactions.map((tx, idx) => {
                                         const isSelected = selectedIdSet.has(tx.id);
                                         const txToolId = normalizeId(tx.tool_id);
                                         const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
                                         const remarkText = String(tx.remark ?? '').trim();
                                         const hasRemark = remarkText !== '' && remarkText !== '-';
                                         return (
-                                            <tr key={tx.id} className={isSelected ? 'row-selected' : ''}>
-                                                <td className="selection-col" onClick={() => toggleSelect(tx.id)}>
+                                            <tr key={tx.id || `ret-${idx}`} className={isSelected ? 'row-selected' : ''}>
+                                                <td
+                                                    className="selection-col"
+                                                    role="checkbox"
+                                                    aria-checked={isSelected}
+                                                    aria-label={`เลือก ${tx.tool_name || tx.tool_id}`}
+                                                    tabIndex={0}
+                                                    onClick={() => toggleSelect(tx.id)}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter' || e.key === ' ') {
+                                                            e.preventDefault();
+                                                            toggleSelect(tx.id);
+                                                        }
+                                                    }}
+                                                >
                                                     {isSelected ?
                                                         <CheckSquare size={20} className="icon-active" /> :
                                                         <Square size={20} className="icon-muted" />
@@ -314,11 +325,12 @@ const ReturnForm = () => {
                                                             📝 {remarkText}
                                                         </span>
                                                     ) : (
-                                                        <span style={{ color: '#94a3b8' }}>-</span>
+                                                        <span className="muted-dash">-</span>
                                                     )}
                                                 </td>
                                                 <td>
                                                     <button
+                                                        type="button"
                                                         className="inline-return-btn"
                                                         onClick={() => handleReturnClick(tx)}
                                                         disabled={isSubmitting}
@@ -340,7 +352,7 @@ const ReturnForm = () => {
                         {filteredTransactions.length === 0 ? (
                             <div className="empty-state">ไม่พบรายการที่ตรงกับการค้นหา</div>
                         ) : (
-                            filteredTransactions.map(tx => {
+                            filteredTransactions.map((tx, idx) => {
                                 const isSelected = selectedIdSet.has(tx.id);
                                 const txToolId = normalizeId(tx.tool_id);
                                 const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
@@ -351,13 +363,23 @@ const ReturnForm = () => {
 
                                 return (
                                     <div
-                                        key={tx.id}
+                                        key={tx.id || `ret-m-${idx}`}
                                         className={`mobile-return-card ${isSelected ? 'is-selected' : ''}`}
                                     >
                                         <div className="m-return-top">
                                             <div
                                                 className="m-checkbox-area"
+                                                role="checkbox"
+                                                aria-checked={isSelected}
+                                                aria-label={`เลือก ${tx.tool_name || tx.tool_id}`}
+                                                tabIndex={0}
                                                 onClick={() => toggleSelect(tx.id)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter' || e.key === ' ') {
+                                                        e.preventDefault();
+                                                        toggleSelect(tx.id);
+                                                    }
+                                                }}
                                             >
                                                 {isSelected ? (
                                                     <CheckSquare size={22} className="icon-active" />

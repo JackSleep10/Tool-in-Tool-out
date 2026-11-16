@@ -1,10 +1,11 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { fetchFromSheet } from '../services/api';
 import { getTodayDateKey, toBangkokDateKey } from '../utils/date';
 import { computeOutstanding, normalizeId } from '../utils/transactions';
 
 const StoreContext = createContext();
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useStore = () => useContext(StoreContext);
 
 export const StoreProvider = ({ children }) => {
@@ -60,7 +61,7 @@ export const StoreProvider = ({ children }) => {
     });
     const lastSyncTimeRef = useRef(lastSyncTime);
 
-    const cacheRecentTransactions = (txList, outstandingList) => {
+    const cacheRecentTransactions = useCallback((txList, outstandingList) => {
         try {
             const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
             const outIds = new Set((outstandingList || []).map(item => item.id).filter(Boolean));
@@ -73,9 +74,9 @@ export const StoreProvider = ({ children }) => {
         } catch (cacheErr) {
             console.warn('LocalStorage transaction cache error:', cacheErr);
         }
-    };
+    }, []);
 
-    const loadData = async (silent = false) => {
+    const loadData = useCallback(async (silent = false) => {
         // M2: avoid overwriting optimistic state while a write mutation is in flight
         if (silent && pendingMutationsRef.current > 0) return;
 
@@ -131,12 +132,12 @@ export const StoreProvider = ({ children }) => {
             setLoading(false);
             setIsRefreshing(false);
         }
-    };
+    }, [cacheRecentTransactions]);
 
     // Initial Data Load (Background update)
     useEffect(() => {
         loadData(true);
-    }, []);
+    }, [loadData]);
 
     // Auto-refresh every 30s only when tab is visible, and sync immediately when returning to tab
     useEffect(() => {
@@ -162,7 +163,7 @@ export const StoreProvider = ({ children }) => {
                 document.removeEventListener('visibilitychange', handleVisibilityChange);
             }
         };
-    }, []);
+    }, [loadData]);
 
     const fetchFullHistory = async () => {
         if (hasFullHistoryRef.current) return;

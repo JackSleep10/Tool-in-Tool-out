@@ -49,10 +49,10 @@
             justify-content: center;
         }
         
-        .text-green-500 { color: var(--success-color); }
-        .text-red-500 { color: var(--danger-color); }
-        .text-blue-500 { color: var(--primary-color); }
-        .text-gray-500 { color: var(--text-secondary); }
+        .modal-icon-success { color: #059669; }
+        .modal-icon-error { color: #dc2626; }
+        .modal-icon-confirm { color: #3b82f6; }
+        .modal-icon-info { color: #6b7280; }
 
         .modal-title {
             margin: 0 0 8px 0;

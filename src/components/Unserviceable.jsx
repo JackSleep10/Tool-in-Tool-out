@@ -1,19 +1,13 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { ShieldAlert, CheckCircle, AlertTriangle, Search, User, RefreshCw, X, QrCode, MapPin, Check } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
+import { useModal } from '../hooks/useModal';
 import { normalizeId } from '../utils/transactions';
+import { matchSearch, isToolUnserviceable } from '../utils/tools';
 import { formatThaiDateTime } from '../utils/date';
 import Modal from './Modal';
 import './Unserviceable.css';
-
-// Helper for multi-keyword search
-const matchSearch = (item, searchStr, fields = ['name', 'id', 'location']) => {
-    if (!searchStr || !searchStr.trim()) return true;
-    const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-    const text = fields.map(f => String(item[f] ?? '').toLowerCase()).join(' ');
-    return tokens.every(token => text.includes(token));
-};
 
 const Unserviceable = () => {
     const { tools, markUnserviceable, markServiceable } = useStore();
@@ -26,32 +20,13 @@ const Unserviceable = () => {
     const [toolSearch, setToolSearch] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // General Modal Notification state
-    const [modal, setModal] = useState({
-        isOpen: false,
-        type: 'info',
-        title: '',
-        message: '',
-        onConfirm: null
-    });
-
-    const showModal = (type, title, message, onConfirm = null) => {
-        setModal({ isOpen: true, type, title, message, onConfirm });
-    };
-
-    const closeModal = () => {
-        setModal(prev => ({ ...prev, isOpen: false }));
-    };
+    const { modal, showModal, closeModal } = useModal();
 
     // Filter tools that are currently UNSERVICEABLE
-    const unserviceableTools = tools.filter(t =>
-        String(t.serviceability_status ?? '').trim().toUpperCase() === 'UNSERVICEABLE'
-    );
+    const unserviceableTools = tools.filter(t => isToolUnserviceable(t));
 
     // Tools available to mark as unserviceable (only SERVICEABLE ones)
-    const serviceableTools = tools.filter(t =>
-        String(t.serviceability_status ?? '').trim().toUpperCase() !== 'UNSERVICEABLE'
-    );
+    const serviceableTools = tools.filter(t => !isToolUnserviceable(t));
 
     const filteredServiceableTools = serviceableTools.filter(t =>
         matchSearch(t, toolSearch, ['name', 'id', 'location'])
@@ -267,7 +242,14 @@ const Unserviceable = () => {
                     <div className="modal-content form-modal">
                         <div className="modal-header">
                             <h3><AlertTriangle size={20} className="text-warning" /> แจ้งอุปกรณ์ชำรุด / ส่งซ่อม</h3>
-                            <button type="button" className="close-btn" onClick={() => { stopScanning(); setIsFormOpen(false); }}><X size={20} /></button>
+                            <button
+                                type="button"
+                                className="close-btn"
+                                onClick={() => { stopScanning(); setIsFormOpen(false); }}
+                                aria-label="ปิดหน้าต่างแจ้งเสีย"
+                            >
+                                <X size={20} />
+                            </button>
                         </div>
                         <form onSubmit={handleMarkSubmit} className="modal-body form-body">
                             
@@ -314,6 +296,7 @@ const Unserviceable = () => {
                                                 className="scan-btn-inline"
                                                 onClick={startScanning}
                                                 title="สแกน QR Code"
+                                                aria-label="เปิดกล้องสแกน QR Code อุปกรณ์"
                                             >
                                                 <QrCode size={18} />
                                             </button>
@@ -324,7 +307,12 @@ const Unserviceable = () => {
                                                 <div className="scanner-container">
                                                     <div className="scanner-header">
                                                         <h4>Scan Tool QR Code</h4>
-                                                        <button type="button" onClick={() => stopScanning()} className="close-scanner">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => stopScanning()}
+                                                            className="close-scanner"
+                                                            aria-label="ปิดกล้องสแกน QR Code"
+                                                        >
                                                             <X size={20} />
                                                         </button>
                                                     </div>

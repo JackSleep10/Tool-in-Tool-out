@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Search, ShoppingBasket, User, MapPin, X, AlertTriangle, QrCode, ShieldAlert } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
+import { useModal } from '../hooks/useModal';
 import { normalizeId } from '../utils/transactions';
+import { matchSearch, isToolUnserviceable } from '../utils/tools';
 import Modal from './Modal';
 import './BorrowForm.css';
 const BorrowForm = () => {
@@ -19,30 +21,7 @@ const BorrowForm = () => {
     const [toolSearch, setToolSearch] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // Modal State
-    const [modal, setModal] = useState({
-        isOpen: false,
-        type: 'info',
-        title: '',
-        message: '',
-        onConfirm: null
-    });
-
-    const showModal = (type, title, message, onConfirm = null) => {
-        setModal({ isOpen: true, type, title, message, onConfirm });
-    };
-
-    const closeModal = () => {
-        setModal(prev => ({ ...prev, isOpen: false }));
-    };
-
-    // Helper for multi-keyword search
-    const matchSearch = (item, searchStr, fields) => {
-        if (!searchStr || !searchStr.trim()) return true;
-        const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-        const text = fields.map(f => String(item[f] ?? '').toLowerCase()).join(' ');
-        return tokens.every(token => text.includes(token));
-    };
+    const { modal, showModal, closeModal } = useModal();
 
     // Filtering
     const filteredEmployees = employees.filter(e =>
@@ -54,12 +33,6 @@ const BorrowForm = () => {
     ).slice(0, 20);
 
     // Handlers
-    // Helper: check if tool is unserviceable
-    const isToolUnserviceable = (tool) => {
-        if (!tool) return false;
-        const status = String(tool.serviceability_status || tool.status || '').trim().toUpperCase();
-        return status === 'UNSERVICEABLE' || status === 'U/S' || status.includes('UNSERVICE') || status.includes('ชำรุด');
-    };
 
     const addToBasket = (tool) => {
         if (!tool) return false;
@@ -303,6 +276,7 @@ const BorrowForm = () => {
                                 className="scan-btn-inline"
                                 onClick={startScanning}
                                 title="สแกน QR Code"
+                                aria-label="เปิดกล้องสแกน QR Code อุปกรณ์"
                             >
                                 <QrCode size={18} />
                             </button>
@@ -312,7 +286,12 @@ const BorrowForm = () => {
                                 <div className="scanner-container">
                                     <div className="scanner-header">
                                         <h4>Scan Tool QR Code</h4>
-                                        <button type="button" onClick={() => stopScanning()} className="close-scanner">
+                                        <button
+                                            type="button"
+                                            onClick={() => stopScanning()}
+                                            className="close-scanner"
+                                            aria-label="ปิดกล้องสแกน QR Code"
+                                        >
                                             <X size={20} />
                                         </button>
                                     </div>
@@ -376,7 +355,12 @@ const BorrowForm = () => {
                                         <h4>{item.name}</h4>
                                         <small>{item.location}</small>
                                     </div>
-                                    <button onClick={() => removeFromBasket(item.id)} className="remove-btn">
+                                    <button
+                                        type="button"
+                                        onClick={() => removeFromBasket(item.id)}
+                                        className="remove-btn"
+                                        aria-label={`นำ ${item.name || item.id} ออกจากตะกร้า`}
+                                    >
                                         <X size={16} />
                                     </button>
                                 </div>

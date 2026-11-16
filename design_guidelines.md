@@ -11,7 +11,7 @@
 * Avoid bounce/elastic easing in animations.
 
 ## Development Rules
-* **Crucial Build Step**: Every time code is edited, you MUST run `npm run build`. This is because the project uses `vite-plugin-singlefile`, meaning all assets are bundled into a single `dist/index.html` file (used for Google Apps Script deployment). If you do not build, changes will not reflect in the final output.
+* **Crucial Build Step**: Every time frontend code is edited, you MUST run `npm run build` and copy `dist/index.html` to `gas/index.html` before `clasp push`. This project uses `vite-plugin-singlefile` with `minify: true`, bundling all assets into a single `dist/index.html` (~950 KB) for Google Apps Script deployment.
 
 ## Global AI Persona Rules
 * **แก้ความมั่ว (Hallucination)**: Provide answers based strictly on the facts. If unsure, state clearly that you don't know.

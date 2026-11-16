@@ -1,4 +1,3 @@
-import React from 'react';
 import { useStore } from '../context/StoreContext';
 import { Clock, CheckCircle, AlertCircle, ShieldAlert } from 'lucide-react';
 import { formatThaiDateTime } from '../utils/date';

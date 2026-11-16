@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { FileText, Calendar, Download, ChevronLeft, ChevronRight, ShoppingBasket, Wrench } from 'lucide-react';
+import { Calendar, Download, ChevronLeft, ChevronRight, ShoppingBasket, Wrench } from 'lucide-react';
 import {
     getTodayDateKey,
     toBangkokDateKey,
@@ -9,9 +9,8 @@ import {
     formatThaiDate,
     formatThaiTime
 } from '../utils/date';
+import { buildReportCsv } from '../utils/csv';
 import './Summary.css';
-
-const csvEscape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 const Summary = () => {
     const { transactions, outstandingTransactions, fetchFullHistory, hasFullHistory, isRefreshing } = useStore();
@@ -75,23 +74,7 @@ const Summary = () => {
         const dataToExport = viewMode === 'daily' ? stats.borrowTx : sortedOutstanding;
         if (dataToExport.length === 0) return;
 
-        const headers = ['Date', 'Time', 'Tool ID', 'Tool Name', 'Employee ID', 'Employee Name', 'Staff', 'Remark', 'Status'];
-        const rows = dataToExport.map(tx => {
-            const isOut = outstandingIdSet.has(tx.id);
-            return [
-                csvEscape(formatThaiDate(tx.date)),
-                csvEscape(formatThaiTime(tx.date)),
-                csvEscape(tx.tool_id ?? ''),
-                csvEscape(tx.tool_name ?? ''),
-                csvEscape(tx.employee_id ?? ''),
-                csvEscape(tx.employee_name ?? ''),
-                csvEscape(tx.staff_issuer || tx.staff_receiver || '-'),
-                csvEscape(String(tx.remark ?? '').trim() || '-'),
-                csvEscape(isOut ? 'ยังไม่คืน' : 'คืนแล้ว')
-            ].join(',');
-        });
-
-        const csvContent = '\uFEFF' + headers.join(',') + '\n' + rows.join('\n');
+        const csvContent = buildReportCsv({ rows: dataToExport, outstandingIdSet });
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -108,12 +91,14 @@ const Summary = () => {
                 <div className="header-left">
                     <div className="view-toggles">
                         <button
+                            type="button"
                             className={`toggle-btn ${viewMode === 'daily' ? 'active' : ''}`}
                             onClick={() => setViewMode('daily')}
                         >
                             <Calendar size={18} /> รายงานรายวัน
                         </button>
                         <button
+                            type="button"
                             className={`toggle-btn ${viewMode === 'outstanding' ? 'active' : ''}`}
                             onClick={() => setViewMode('outstanding')}
                         >
@@ -125,22 +110,37 @@ const Summary = () => {
                 {viewMode === 'daily' && (
                     <div className="report-actions">
                         <div className="date-controls">
-                            <button className="icon-btn" onClick={() => changeDate(-1)}><ChevronLeft /></button>
+                            <button
+                                type="button"
+                                className="icon-btn"
+                                onClick={() => changeDate(-1)}
+                                aria-label="วันก่อนหน้า"
+                            >
+                                <ChevronLeft />
+                            </button>
                             <h2 className="date-display">{formatThaiDate(selectedDate)}</h2>
-                            <button className="icon-btn" onClick={() => changeDate(1)}><ChevronRight /></button>
+                            <button
+                                type="button"
+                                className="icon-btn"
+                                onClick={() => changeDate(1)}
+                                aria-label="วันถัดไป"
+                            >
+                                <ChevronRight />
+                            </button>
                         </div>
                         <div className="date-tools-sub">
                             <div className="date-picker-wrapper">
                                 <Calendar size={18} className="picker-icon" />
                                 <input
                                     type="date"
+                                    aria-label="เลือกวันที่ดูรายงาน"
                                     value={selectedDate}
                                     onChange={(e) => {
                                         if (e.target.value) setSelectedDate(e.target.value);
                                     }}
                                 />
                             </div>
-                            <button className="btn-export" onClick={downloadCSV} title="Export CSV">
+                            <button type="button" className="btn-export" onClick={downloadCSV} title="Export CSV">
                                 <Download size={18} /> Export
                             </button>
                         </div>
@@ -149,34 +149,13 @@ const Summary = () => {
             </div>
 
             {isOlderThan30Days && !hasFullHistory && (
-                <div style={{
-                    margin: '0 0 16px 0',
-                    padding: '12px 16px',
-                    background: '#fff8e1',
-                    border: '1px solid #ffe082',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                    gap: '10px',
-                    color: '#8d6e63',
-                    fontSize: '14px'
-                }}>
+                <div className="history-banner">
                     <span>📅 วันที่เลือกอยู่นอกช่วง 30 วันล่าสุด คุณต้องการโหลดข้อมูลประวัติย้อนหลังทั้งหมดหรือไม่?</span>
                     <button
+                        type="button"
+                        className="history-banner-btn"
                         onClick={fetchFullHistory}
                         disabled={isRefreshing}
-                        style={{
-                            background: '#d32f2f',
-                            color: '#fff',
-                            border: 'none',
-                            padding: '6px 14px',
-                            borderRadius: '6px',
-                            fontWeight: '600',
-                            cursor: isRefreshing ? 'not-allowed' : 'pointer',
-                            fontSize: '13px'
-                        }}
                     >
                         {isRefreshing ? 'กำลังโหลดประวัติ...' : 'โหลดประวัติทั้งหมด'}
                     </button>
@@ -209,11 +188,11 @@ const Summary = () => {
                                     <div className="desktop-table-view">
                                         <table className="summary-table fixed-table">
                                             <colgroup>
-                                                <col style={{width: '14%'}} />
-                                                <col style={{width: '36%'}} />
-                                                <col style={{width: '20%'}} />
-                                                <col style={{width: '18%'}} />
-                                                <col style={{width: '12%'}} />
+                                                <col className="col-w-14" />
+                                                <col className="col-w-36" />
+                                                <col className="col-w-20" />
+                                                <col className="col-w-18" />
+                                                <col className="col-w-12" />
                                             </colgroup>
                                             <thead>
                                                 <tr>
@@ -223,14 +202,22 @@ const Summary = () => {
                                                     <th>ผู้จ่ายของ</th>
                                                     <th
                                                         onClick={toggleSort}
-                                                        style={{ cursor: 'pointer', userSelect: 'none' }}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                                e.preventDefault();
+                                                                toggleSort();
+                                                            }
+                                                        }}
+                                                        tabIndex={0}
+                                                        role="button"
+                                                        className="sort-th"
                                                         title="กดเพื่อเรียงลำดับ"
                                                     >
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                        <div className="sort-header-inner">
                                                             สถานะ
-                                                            <div style={{ display: 'flex', flexDirection: 'column', lineHeight: '0.5' }}>
-                                                                <span style={{ opacity: sortOrder === 'asc' ? 1 : 0.3, fontSize: '10px' }}>▲</span>
-                                                                <span style={{ opacity: sortOrder === 'desc' ? 1 : 0.3, fontSize: '10px' }}>▼</span>
+                                                            <div className="sort-arrows">
+                                                                <span className={`sort-arrow ${sortOrder === 'asc' ? 'active' : ''}`}>▲</span>
+                                                                <span className={`sort-arrow ${sortOrder === 'desc' ? 'active' : ''}`}>▼</span>
                                                             </div>
                                                         </div>
                                                     </th>
@@ -322,11 +309,11 @@ const Summary = () => {
                                     <div className="desktop-table-view">
                                         <table className="summary-table fixed-table">
                                             <colgroup>
-                                                <col style={{width: '14%'}} />
-                                                <col style={{width: '36%'}} />
-                                                <col style={{width: '20%'}} />
-                                                <col style={{width: '18%'}} />
-                                                <col style={{width: '12%'}} />
+                                                <col className="col-w-14" />
+                                                <col className="col-w-36" />
+                                                <col className="col-w-20" />
+                                                <col className="col-w-18" />
+                                                <col className="col-w-12" />
                                             </colgroup>
                                             <thead>
                                                 <tr>
@@ -395,7 +382,7 @@ const Summary = () => {
                         <div className="card-title text-danger">
                             <Wrench size={18} /> รายการค้างส่งทั้งหมด (All Outstanding)
                             <span className="sub-label">เรียงจากเก่าไปใหม่ (Oldest First)</span>
-                            <button className="btn-export" onClick={downloadCSV} title="Export CSV" style={{marginLeft: 'auto'}}>
+                            <button type="button" className="btn-export btn-export-auto" onClick={downloadCSV} title="Export CSV">
                                 <Download size={18} /> Export
                             </button>
                         </div>
@@ -426,7 +413,7 @@ const Summary = () => {
                                                         <span className="remark-text">{tx.id}</span>
                                                     </div>
                                                 </td>
-                                                <td>{tx.employee_name} <br /><small style={{ color: '#666' }}>{tx.employee_id}</small></td>
+                                                <td>{tx.employee_name} <br /><small className="sub-emp-id">{tx.employee_id}</small></td>
                                                 <td className="staff-col">{tx.staff_issuer}</td>
                                                 <td>
                                                     <span className="badge-status outstanding">ยังไม่คืน</span>

@@ -83,10 +83,11 @@ export function shiftDateKey(dateKey, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-export function isDateKeyOlderThanDays(dateKey, days) {
+export function isDateKeyOlderThanDays(dateKey, days, referenceDate = new Date()) {
   const normalized = toBangkokDateKey(dateKey);
   if (!normalized) return false;
-  const cutoffKey = shiftDateKey(getTodayDateKey(), -days);
+  const baseKey = toBangkokDateKey(referenceDate) || getTodayDateKey();
+  const cutoffKey = shiftDateKey(baseKey, -days);
   return normalized < cutoffKey;
 }
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { StoreProvider } from './context/StoreContext';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import Dashboard from './components/Dashboard';
 import BorrowForm from './components/BorrowForm';
 import ReturnForm from './components/ReturnForm';
@@ -25,11 +26,15 @@ function App() {
     };
 
     return (
-        <StoreProvider>
-            <Layout activeTab={activeTab} onTabChange={setActiveTab}>
-                {renderContent()}
-            </Layout>
-        </StoreProvider>
+        <ErrorBoundary>
+            <StoreProvider>
+                <Layout activeTab={activeTab} onTabChange={setActiveTab}>
+                    <ErrorBoundary key={activeTab}>
+                        {renderContent()}
+                    </ErrorBoundary>
+                </Layout>
+            </StoreProvider>
+        </ErrorBoundary>
     );
 }
 
