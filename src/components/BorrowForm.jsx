@@ -1,0 +1,410 @@
+import React, { useState } from 'react';
+import { useStore } from '../context/StoreContext';
+import { Search, ShoppingBasket, User, MapPin, X, AlertTriangle, QrCode, ShieldAlert } from 'lucide-react';
+import { Html5Qrcode } from 'html5-qrcode';
+import Modal from './Modal';
+import './BorrowForm.css';
+const BorrowForm = () => {
+    const { employees, tools, addBatchTransactions, isToolCurrentlyOut, getToolBorrower } = useStore();
+
+    // Selection State
+    const [selectedEmployee, setSelectedEmployee] = useState(null);
+    const [basket, setBasket] = useState([]);
+
+    // Form Inputs
+    const [issuerName, setIssuerName] = useState(localStorage.getItem('staffIssuerName') || '');
+    const [remark, setRemark] = useState('');
+    const [empSearch, setEmpSearch] = useState('');
+    const [toolSearch, setToolSearch] = useState('');
+    const [isScanning, setIsScanning] = useState(false);
+    const [scanner, setScanner] = useState(null);
+
+    // Modal State
+    const [modal, setModal] = useState({
+        isOpen: false,
+        type: 'info',
+        title: '',
+        message: '',
+        onConfirm: null
+    });
+
+    const showModal = (type, title, message, onConfirm = null) => {
+        setModal({ isOpen: true, type, title, message, onConfirm });
+    };
+
+    const closeModal = () => {
+        setModal(prev => ({ ...prev, isOpen: false }));
+    };
+
+    // Helper for multi-keyword search
+    const matchSearch = (item, searchStr, fields) => {
+        if (!searchStr || !searchStr.trim()) return true;
+        const tokens = searchStr.trim().toLowerCase().split(/\s+/);
+        const text = fields.map(f => (item[f] || '').toString().toLowerCase()).join(' ');
+        return tokens.every(token => text.includes(token));
+    };
+
+    // Filtering
+    const filteredEmployees = employees.filter(e =>
+        matchSearch(e, empSearch, ['name', 'id', 'department'])
+    ).slice(0, 20);
+
+    const filteredTools = tools.filter(t =>
+        matchSearch(t, toolSearch, ['name', 'id', 'location'])
+    ).slice(0, 20);
+
+    // Handlers
+    // Helper: check if tool is unserviceable
+    const isToolUnserviceable = (tool) => {
+        if (!tool) return false;
+        const status = (tool.serviceability_status || tool.status || '').toString().trim().toUpperCase();
+        return status === 'UNSERVICEABLE' || status === 'U/S' || status.includes('UNSERVICE') || status.includes('ชำรุด');
+    };
+
+    const addToBasket = (tool) => {
+        // 0. Block Unserviceable tools
+        if (isToolUnserviceable(tool)) {
+            showModal('error', '⛔ อุปกรณ์ชำรุด (U/S)', `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้\nสาเหตุ: ${tool.unserviceable_reason || 'ไม่ระบุ'}`);
+            return;
+        }
+
+        // 1. Check if already in basket
+        if (basket.some(t => t.id === tool.id)) {
+            showModal('error', 'ข้อผิดพลาด', 'อุปกรณ์นี้มีอยู่ในตะกร้าแล้ว');
+            return;
+        }
+
+        // 2. Global Availability Check (Quick Return Logic)
+        if (isToolCurrentlyOut(tool.id)) {
+            const borrower = getToolBorrower(tool.id);
+            showModal(
+                'confirm',
+                'อุปกรณ์ยังไม่ได้คืน',
+                `"${tool.name}" อยู่กับ ${borrower.employee_name} (${borrower.employee_id}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
+                () => {
+                    // Perform Quick Return
+                    addBatchTransactions([{
+                        action: 'RETURN',
+                        tool_id: tool.id,
+                        tool_name: tool.name,
+                        employee_id: borrower.employee_id,
+                        employee_name: borrower.employee_name,
+                        quantity: 1,
+                        staff_issuer: borrower.staff_issuer,
+                        staff_receiver: 'Auto-Return',
+                        linked_borrow_id: borrower.id,
+                        remark: 'คืนอัตโนมัติเพื่อยืมต่อ'
+                    }]);
+
+                    // Add to current basket
+                    setBasket(prev => [...prev, tool]);
+                    setToolSearch('');
+                }
+            );
+            return;
+        }
+
+        setBasket([...basket, tool]);
+        setToolSearch('');
+    };
+
+    const processToolSearch = (searchValue) => {
+        const cleanSearch = searchValue.trim().toLowerCase();
+        if (!cleanSearch) return;
+
+        // Try to find exact ID match
+        const exactMatch = tools.find(t =>
+            (t.id || '').toString().toLowerCase() === cleanSearch
+        );
+
+        if (exactMatch) {
+            addToBasket(exactMatch);
+        }
+    };
+
+    const handleToolKeyDown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            processToolSearch(toolSearch);
+        }
+    };
+
+    const startScanning = async () => {
+        setIsScanning(true);
+        setTimeout(() => {
+            const html5QrCode = new Html5Qrcode("reader");
+            setScanner(html5QrCode);
+            html5QrCode.start(
+                { facingMode: "environment" },
+                {
+                    fps: 10,
+                    qrbox: { width: 250, height: 250 }
+                },
+                (decodedText) => {
+                    // Success callback
+                    if (!decodedText || !decodedText.trim()) return;
+
+                    const scannedId = decodedText.trim().toLowerCase();
+                    const tool = tools.find(t =>
+                        t.id.toString().trim().toLowerCase() === scannedId
+                    );
+
+                    if (tool) {
+                        if (isToolUnserviceable(tool)) {
+                            stopScanning(html5QrCode);
+                            showModal('error', '⛔ อุปกรณ์ชำรุด (U/S)', `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้\nสาเหตุ: ${tool.unserviceable_reason || 'ไม่ระบุ'}`);
+                        } else {
+                            addToBasket(tool);
+                            stopScanning(html5QrCode);
+                            showModal('success', 'สแกนสำเร็จ', `เพิ่ม "${tool.name}" ลงในตะกร้าแล้ว`);
+                        }
+                    } else {
+                        showModal('error', 'ไม่พบข้อมูล', `ไม่พบอุปกรณ์รหัส "${decodedText}" ในระบบ`);
+                    }
+                },
+                (errorMessage) => {
+                    // console.log(errorMessage);
+                }
+            ).catch(err => {
+                showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
+                setIsScanning(false);
+            });
+        }, 100);
+    };
+
+    const stopScanning = (scannerInstance = scanner) => {
+        if (scannerInstance && scannerInstance.isScanning) {
+            scannerInstance.stop().then(() => {
+                scannerInstance.clear();
+                setIsScanning(false);
+                setScanner(null);
+            }).catch(err => console.error(err));
+        } else {
+            setIsScanning(false);
+            setScanner(null);
+        }
+    };
+
+    const removeFromBasket = (toolId) => {
+        setBasket(basket.filter(t => t.id !== toolId));
+    };
+
+    const handleSubmit = () => {
+        if (!selectedEmployee) {
+            showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อพนักงานผู้ยืม');
+            return;
+        }
+        if (basket.length === 0) {
+            showModal('error', 'แจ้งเตือน', 'กรุณาเลือกอุปกรณ์อย่างน้อย 1 ชิ้น');
+            return;
+        }
+        if (!issuerName) {
+            showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้จ่ายของ (Staff Issuer)');
+            return;
+        }
+
+        // Check for any unserviceable tools in basket
+        const usItem = basket.find(tool => isToolUnserviceable(tool));
+        if (usItem) {
+            showModal('error', '⛔ อุปกรณ์ชำรุด (U/S)', `อุปกรณ์ "${usItem.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้ โปรดนำออกจากตะกร้า`);
+            return;
+        }
+
+        // Final sanity check for everything in basket (in case data refreshed)
+        const unavailable = basket.find(tool => isToolCurrentlyOut(tool.id));
+        if (unavailable) {
+            const borrower = getToolBorrower(unavailable.id);
+            showModal('error', 'พบปัญหาในการบันทึก', `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${borrower.employee_name} โปรดนำออกจากตะกร้าก่อนบันทึก`);
+            return;
+        }
+
+        // Confirm Action
+        showModal('confirm', 'ยืนยันการทำรายการ', `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, () => {
+            const batchData = basket.map(tool => ({
+                action: 'BORROW',
+                tool_id: tool.id,
+                tool_name: tool.name,
+                employee_id: selectedEmployee.id,
+                employee_name: selectedEmployee.name,
+                quantity: 1,
+                staff_issuer: issuerName,
+                staff_receiver: '-',
+                remark: remark
+            }));
+
+            addBatchTransactions(batchData);
+
+            setBasket([]);
+            setSelectedEmployee(null);
+            setEmpSearch('');
+            setRemark(''); // Reset remark
+            localStorage.setItem('staffIssuerName', issuerName);
+            showModal('success', 'สำเร็จ', 'บันทึกรายการยืมเรียบร้อยแล้ว');
+        });
+    };
+
+    return (
+        <div className="borrow-container">
+            <Modal
+                isOpen={modal.isOpen}
+                onClose={closeModal}
+                type={modal.type}
+                title={modal.title}
+                message={modal.message}
+                onConfirm={modal.onConfirm}
+                confirmText={modal.type === 'confirm' ? 'ยืนยัน' : 'ตกลง'}
+                cancelText='ยกเลิก'
+            />
+
+            <div className="form-grid">
+                <div className="input-panel">
+                    <h3>1. ข้อมูลการยืม (Borrow Info)</h3>
+
+                    <div className="form-group">
+                        <label>ผู้จ่ายของ (Staff Issuer)</label>
+                        <input
+                            type="text"
+                            className="full-width"
+                            placeholder="ระบุชื่อของคุณ..."
+                            value={issuerName}
+                            onChange={e => setIssuerName(e.target.value)}
+                        />
+                    </div>
+
+                    <div className="form-group relative">
+                        <label>พนักงานผู้ยืม (Employee)</label>
+                        <div className="search-wrap">
+                            <User className="icon" size={18} />
+                            <input
+                                type="text"
+                                placeholder="ค้นหาชื่อ หรือ รหัส..."
+                                value={selectedEmployee ? selectedEmployee.name : empSearch}
+                                onChange={e => {
+                                    setEmpSearch(e.target.value);
+                                    setSelectedEmployee(null);
+                                }}
+                            />
+                        </div>
+                        {empSearch && !selectedEmployee && filteredEmployees.length > 0 && (
+                            <ul className="suggestions">
+                                {filteredEmployees.map(emp => (
+                                    <li key={emp.name} onClick={() => {
+                                        setSelectedEmployee(emp);
+                                        setEmpSearch(emp.name);
+                                    }}>
+                                        <strong>{emp.name}</strong> <small>({emp.id})</small>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+
+                    <div className="form-group relative">
+                        <label>เลือกอุปกรณ์ (Select Tools)</label>
+                        <div className="search-wrap">
+                            <Search className="icon" size={18} />
+                            <input
+                                type="text"
+                                placeholder="ค้นหาชื่ออุปกรณ์ หรือ ที่เก็บ... (สแกน QR ได้)"
+                                value={toolSearch}
+                                onChange={e => setToolSearch(e.target.value)}
+                                onKeyDown={handleToolKeyDown}
+                            />
+                            <button
+                                className="scan-btn-inline"
+                                onClick={startScanning}
+                                title="สแกน QR Code"
+                            >
+                                <QrCode size={18} />
+                            </button>
+                        </div>
+                        {isScanning && (
+                            <div className="scanner-overlay">
+                                <div className="scanner-container">
+                                    <div className="scanner-header">
+                                        <h4>Scan Tool QR Code</h4>
+                                        <button onClick={() => stopScanning()} className="close-scanner">
+                                            <X size={20} />
+                                        </button>
+                                    </div>
+                                    <div id="reader"></div>
+                                    <p className="scanner-tip">วาง QR Code ให้อยู่ในกรอบเพื่อสแกน</p>
+                                </div>
+                            </div>
+                        )}
+                        {toolSearch && filteredTools.length > 0 && (
+                            <ul className="suggestions">
+                                {filteredTools.map(tool => {
+                                    const isOut = isToolCurrentlyOut(tool.id);
+                                    const isUS = isToolUnserviceable(tool);
+                                    return (
+                                        <li
+                                            key={tool.id}
+                                            onClick={() => addToBasket(tool)}
+                                            className={isUS ? 'disabled unserviceable' : isOut ? 'disabled' : ''}
+                                        >
+                                            <div className="tool-row">
+                                                <div className="tool-info-line">
+                                                    <span>{tool.name}</span>
+                                                    {isUS && <span className="status-label us"><ShieldAlert size={12} /> U/S ชำรุด</span>}
+                                                    {!isUS && isOut && <span className="status-label out"><AlertTriangle size={12} /> ถูกยืมอยู่</span>}
+                                                </div>
+                                                <span className="badge-bin"><MapPin size={12} /> {tool.location}</span>
+                                            </div>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+
+                    {/* Remark Field */}
+                    <div className="form-group">
+                        <label>หมายเหตุ (Remark)</label>
+                        <textarea
+                            className="full-width remark-area"
+                            placeholder="ระบุหมายเหตุการยืม (เช่น ยืมไปใช้งานที่แผนก...)"
+                            value={remark}
+                            onChange={e => setRemark(e.target.value)}
+                            rows="3"
+                        ></textarea>
+                    </div>
+                </div>
+
+                <div className="basket-panel">
+                    <h3>
+                        <ShoppingBasket size={24} />
+                        รายการในตะกร้า ({basket.length})
+                    </h3>
+
+                    <div className="basket-list">
+                        {basket.length === 0 ? (
+                            <div className="empty-state">ยังไม่มีรายการ</div>
+                        ) : (
+                            basket.map((item, idx) => (
+                                <div key={idx} className="basket-item">
+                                    <div className="item-info">
+                                        <h4>{item.name}</h4>
+                                        <small>{item.location}</small>
+                                    </div>
+                                    <button onClick={() => removeFromBasket(item.id)} className="remove-btn">
+                                        <X size={16} />
+                                    </button>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    <div className="action-area">
+                        <button className="submit-btn" onClick={handleSubmit}>
+                            บันทึกการยืม
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    );
+};
+
+export default BorrowForm;
