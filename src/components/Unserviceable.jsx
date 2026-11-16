@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { ShieldAlert, CheckCircle, AlertTriangle, Search, User, RefreshCw, X, QrCode, MapPin, Check } from 'lucide-react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { useQrScanner } from '../hooks/useQrScanner';
+import { normalizeId } from '../utils/transactions';
+import { formatThaiDateTime } from '../utils/date';
 import Modal from './Modal';
 import './Unserviceable.css';
 
@@ -9,7 +11,7 @@ import './Unserviceable.css';
 const matchSearch = (item, searchStr, fields = ['name', 'id', 'location']) => {
     if (!searchStr || !searchStr.trim()) return true;
     const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-    const text = fields.map(f => (item[f] || '').toString().toLowerCase()).join(' ');
+    const text = fields.map(f => String(item[f] ?? '').toLowerCase()).join(' ');
     return tokens.every(token => text.includes(token));
 };
 
@@ -22,8 +24,6 @@ const Unserviceable = () => {
     const [reason, setReason] = useState('');
     const [markedBy, setMarkedBy] = useState(localStorage.getItem('staffIssuerName') || '');
     const [toolSearch, setToolSearch] = useState('');
-    const [isScanning, setIsScanning] = useState(false);
-    const [scanner, setScanner] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // General Modal Notification state
@@ -45,12 +45,12 @@ const Unserviceable = () => {
 
     // Filter tools that are currently UNSERVICEABLE
     const unserviceableTools = tools.filter(t =>
-        (t.serviceability_status || '').toUpperCase() === 'UNSERVICEABLE'
+        String(t.serviceability_status ?? '').trim().toUpperCase() === 'UNSERVICEABLE'
     );
 
     // Tools available to mark as unserviceable (only SERVICEABLE ones)
     const serviceableTools = tools.filter(t =>
-        (t.serviceability_status || '').toUpperCase() !== 'UNSERVICEABLE'
+        String(t.serviceability_status ?? '').trim().toUpperCase() !== 'UNSERVICEABLE'
     );
 
     const filteredServiceableTools = serviceableTools.filter(t =>
@@ -73,10 +73,11 @@ const Unserviceable = () => {
             return;
         }
 
+        const trimmedMarkedBy = markedBy.trim();
         setIsSubmitting(true);
         try {
-            await markUnserviceable(selectedTool.id, reason, markedBy);
-            localStorage.setItem('staffIssuerName', markedBy);
+            await markUnserviceable(selectedTool.id, reason.trim(), trimmedMarkedBy);
+            localStorage.setItem('staffIssuerName', trimmedMarkedBy);
             setIsFormOpen(false);
             setSelectedTool(null);
             setReason('');
@@ -89,50 +90,25 @@ const Unserviceable = () => {
         }
     };
 
-    const startScanning = async () => {
-        setIsScanning(true);
-        setTimeout(() => {
-            const html5QrCode = new Html5Qrcode("reader-unserviceable");
-            setScanner(html5QrCode);
-            html5QrCode.start(
-                { facingMode: "environment" },
-                { fps: 10, qrbox: { width: 250, height: 250 } },
-                (decodedText) => {
-                    if (!decodedText || !decodedText.trim()) return;
-                    const scannedId = decodedText.trim().toLowerCase();
-                    const tool = serviceableTools.find(t =>
-                        (t.id || '').toString().trim().toLowerCase() === scannedId
-                    );
+    const { isScanning, startScanning, stopScanning } = useQrScanner({
+        elementId: 'reader-unserviceable',
+        onScan: (decodedText, stop) => {
+            stop();
+            const scannedId = normalizeId(decodedText);
+            const tool = scannedId ? serviceableTools.find(t => normalizeId(t.id) === scannedId) : null;
 
-                    if (tool) {
-                        setSelectedTool(tool);
-                        setToolSearch('');
-                        stopScanning(html5QrCode);
-                        showModal('success', 'สแกนสำเร็จ', `เลือก "${tool.name || tool.id}" เรียบร้อยแล้ว`);
-                    } else {
-                        showModal('error', 'ไม่พบข้อมูล', `ไม่พบอุปกรณ์รหัส "${decodedText}" ที่พร้อมใช้งาน`);
-                    }
-                },
-                () => {}
-            ).catch(err => {
-                showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
-                setIsScanning(false);
-            });
-        }, 100);
-    };
-
-    const stopScanning = (scannerInstance = scanner) => {
-        if (scannerInstance && scannerInstance.isScanning) {
-            scannerInstance.stop().then(() => {
-                scannerInstance.clear();
-                setIsScanning(false);
-                setScanner(null);
-            }).catch(err => console.error(err));
-        } else {
-            setIsScanning(false);
-            setScanner(null);
+            if (tool) {
+                setSelectedTool(tool);
+                setToolSearch('');
+                showModal('success', 'สแกนสำเร็จ', `เลือก "${tool.name || tool.id}" เรียบร้อยแล้ว`);
+            } else {
+                showModal('error', 'ไม่พบข้อมูล', `ไม่พบอุปกรณ์รหัส "${decodedText}" ที่พร้อมใช้งาน`);
+            }
+        },
+        onError: (err) => {
+            showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
         }
-    };
+    });
 
     const handleRestoreClick = (tool) => {
         if (isSubmitting) return;
@@ -202,8 +178,8 @@ const Unserviceable = () => {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {unserviceableTools.map(tool => (
-                                            <tr key={tool.id}>
+                                        {unserviceableTools.map((tool, idx) => (
+                                            <tr key={tool.id || `us-${idx}`}>
                                                 <td>
                                                     <div className="tool-info-cell">
                                                         <span className="tool-name">{tool.name || 'ไม่ระบุชื่อ'}</span>
@@ -220,9 +196,7 @@ const Unserviceable = () => {
                                                 </td>
                                                 <td>
                                                     <span className="date-text">
-                                                        {tool.unserviceable_date
-                                                            ? new Date(tool.unserviceable_date).toLocaleDateString('th-TH') + ' ' + new Date(tool.unserviceable_date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })
-                                                            : '-'}
+                                                        {formatThaiDateTime(tool.unserviceable_date)}
                                                     </span>
                                                 </td>
                                                 <td>
@@ -244,13 +218,11 @@ const Unserviceable = () => {
 
                             {/* Mobile Cards View */}
                             <div className="mobile-cards-view">
-                                {unserviceableTools.map(tool => {
-                                    const dateStr = tool.unserviceable_date
-                                        ? new Date(tool.unserviceable_date).toLocaleDateString('th-TH') + ' ' + new Date(tool.unserviceable_date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })
-                                        : '-';
+                                {unserviceableTools.map((tool, idx) => {
+                                    const dateStr = formatThaiDateTime(tool.unserviceable_date);
 
                                     return (
-                                        <div key={tool.id} className="mobile-us-card">
+                                        <div key={tool.id || `us-m-${idx}`} className="mobile-us-card">
                                             <div className="m-us-header">
                                                 <div className="m-us-tool">
                                                     <span className="m-tool-title">{tool.name || 'ไม่ระบุชื่อ'}</span>
@@ -295,7 +267,7 @@ const Unserviceable = () => {
                     <div className="modal-content form-modal">
                         <div className="modal-header">
                             <h3><AlertTriangle size={20} className="text-warning" /> แจ้งอุปกรณ์ชำรุด / ส่งซ่อม</h3>
-                            <button className="close-btn" onClick={() => setIsFormOpen(false)}><X size={20} /></button>
+                            <button type="button" className="close-btn" onClick={() => { stopScanning(); setIsFormOpen(false); }}><X size={20} /></button>
                         </div>
                         <form onSubmit={handleMarkSubmit} className="modal-body form-body">
                             
@@ -365,9 +337,9 @@ const Unserviceable = () => {
                                         {/* Live Autocomplete Suggestions */}
                                         <ul className="suggestions tool-suggestions">
                                             {filteredServiceableTools.length > 0 ? (
-                                                filteredServiceableTools.map(t => (
+                                                filteredServiceableTools.map((t, idx) => (
                                                     <li
-                                                        key={t.id || t.name}
+                                                        key={t.id || `srv-${idx}`}
                                                         onClick={() => {
                                                             setSelectedTool(t);
                                                             setToolSearch('');
@@ -421,7 +393,7 @@ const Unserviceable = () => {
                             </div>
 
                             <div className="modal-footer">
-                                <button type="button" className="btn-secondary" onClick={() => setIsFormOpen(false)}>
+                                <button type="button" className="btn-secondary" onClick={() => { stopScanning(); setIsFormOpen(false); }}>
                                     ยกเลิก
                                 </button>
                                 <button type="submit" className="btn-primary confirm-warning" disabled={!selectedTool || isSubmitting}>

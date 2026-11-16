@@ -129,23 +129,51 @@ function sanitizeCell(value) {
 }
 
 /**
- * Replay transactions in order (FIFO) and return the list of BORROW records
+ * Replay transactions chronologically and return the list of BORROW records
  * that have not been returned yet, plus a map of RETURN id -> matched BORROW id.
+ * Matches by linked_borrow_id first, then falls back to FIFO by (tool_id, employee_id).
  */
 function computeOutstanding(allTx) {
+  if (!allTx || allTx.length === 0) {
+    return { outstandingList: [], returnToBorrowMap: {} };
+  }
+
+  const sorted = allTx.slice().sort(function(a, b) {
+    const ta = new Date(a && a.date).getTime();
+    const tb = new Date(b && b.date).getTime();
+    const na = isNaN(ta) ? 0 : ta;
+    const nb = isNaN(tb) ? 0 : tb;
+    return na - nb;
+  });
+
   const outstandingList = [];
   const returnToBorrowMap = {};
 
-  for (let i = 0; i < allTx.length; i++) {
-    const tx = allTx[i];
+  for (let i = 0; i < sorted.length; i++) {
+    const tx = sorted[i];
+    if (!tx) continue;
+
     if (tx.action === 'BORROW') {
       outstandingList.push(tx);
     } else if (tx.action === 'RETURN') {
-      const toolId = normalizeId(tx.tool_id);
-      const empId = normalizeId(tx.employee_id);
-      const idx = outstandingList.findIndex(function(item) {
-        return normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId;
-      });
+      const linkedId = normalizeId(tx.linked_borrow_id);
+      let idx = -1;
+
+      if (linkedId && linkedId !== '-') {
+        idx = outstandingList.findIndex(function(item) {
+          const itemId = normalizeId(item.id);
+          return itemId !== '' && itemId === linkedId;
+        });
+      }
+
+      if (idx === -1) {
+        const toolId = normalizeId(tx.tool_id);
+        const empId = normalizeId(tx.employee_id);
+        idx = outstandingList.findIndex(function(item) {
+          return normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId;
+        });
+      }
+
       if (idx !== -1) {
         const matchedBorrow = outstandingList.splice(idx, 1)[0];
         if (tx.id && matchedBorrow.id) {
@@ -174,7 +202,7 @@ function getAllData(payload) {
 
   const allTx = getSheetData(ss, 'Transactions');
   
-  // Replay FIFO to match returns with borrows
+  // Replay FIFO / linked_borrow_id to match returns with borrows
   const replay = computeOutstanding(allTx);
   const outstandingList = replay.outstandingList;
   const returnToBorrowMap = replay.returnToBorrowMap;
@@ -233,13 +261,15 @@ function getSheetData(ss, sheetName) {
   if (!sheet) return [];
   
   const data = sheet.getDataRange().getValues();
+  if (!data || data.length === 0) return [];
   const headers = data[0];
   const rows = data.slice(1);
   
   return rows.map(row => {
     let obj = {};
     headers.forEach((h, i) => {
-      obj[h.toLowerCase()] = row[i];
+      const key = (h === null || h === undefined ? '' : h).toString().trim().toLowerCase();
+      if (key) obj[key] = row[i];
     });
     return obj;
   });
@@ -275,20 +305,22 @@ function addBatchTransactions(transactions) {
   const toolsSheet = ss.getSheetByName('Tools');
   if (toolsSheet) {
     const toolsData = toolsSheet.getDataRange().getValues();
-    const tHeaders = toolsData[0].map(h => h.toString().toLowerCase().trim());
-    const idCol = tHeaders.indexOf('id');
-    const statCol = tHeaders.indexOf('serviceability_status');
-    if (idCol !== -1 && statCol !== -1) {
-      const usMap = {};
-      for (let i = 1; i < toolsData.length; i++) {
-        const tid = normalizeId(toolsData[i][idCol]);
-        const stat = (toolsData[i][statCol] || '').toString().toUpperCase().trim();
-        if (stat === 'UNSERVICEABLE') usMap[tid] = true;
-      }
-      for (let j = 0; j < transactions.length; j++) {
-        const t = transactions[j];
-        if (t.action === 'BORROW' && usMap[normalizeId(t.tool_id)]) {
-          throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้');
+    if (toolsData.length > 0) {
+      const tHeaders = toolsData[0].map(h => (h === null || h === undefined ? '' : h).toString().trim().toLowerCase());
+      const idCol = tHeaders.indexOf('id');
+      const statCol = tHeaders.indexOf('serviceability_status');
+      if (idCol !== -1 && statCol !== -1) {
+        const usMap = {};
+        for (let i = 1; i < toolsData.length; i++) {
+          const tid = normalizeId(toolsData[i][idCol]);
+          const stat = (toolsData[i][statCol] || '').toString().toUpperCase().trim();
+          if (stat === 'UNSERVICEABLE') usMap[tid] = true;
+        }
+        for (let j = 0; j < transactions.length; j++) {
+          const t = transactions[j];
+          if (t.action === 'BORROW' && usMap[normalizeId(t.tool_id)]) {
+            throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้');
+          }
         }
       }
     }
@@ -355,7 +387,8 @@ function markToolServiceability(data, status, _retry) {
   if (!data.tool_id) throw new Error('tool_id is required');
 
   const allData = sheet.getDataRange().getValues();
-  const headers = allData[0].map(h => h.toString().toLowerCase());
+  if (!allData || allData.length === 0) throw new Error('Tools sheet is empty');
+  const headers = allData[0].map(h => (h === null || h === undefined ? '' : h).toString().trim().toLowerCase());
 
   // Find column indices
   const idCol = headers.indexOf('id');

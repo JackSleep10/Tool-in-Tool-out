@@ -18,13 +18,19 @@ const QRManagement = () => {
     window.print();
   };
 
+  const sanitizeFilenamePart = (val, fallback = 'unknown') => {
+    const cleaned = String(val ?? '').trim().replace(/[\\/:*?"<>|]+/g, '_');
+    return cleaned || fallback;
+  };
+
   const downloadQR = (toolId, toolName) => {
+    if (!toolId) return;
     const canvas = document.getElementById(`qr-${toolId}`);
     if (!canvas) return;
     const pngUrl = canvas.toDataURL("image/png").replace("image/png", "image/octet-stream");
     let downloadLink = document.createElement("a");
     downloadLink.href = pngUrl;
-    downloadLink.download = `QR_${toolId}_${toolName}.png`;
+    downloadLink.download = `QR_${sanitizeFilenamePart(toolId, 'id')}_${sanitizeFilenamePart(toolName, 'tool')}.png`;
     document.body.appendChild(downloadLink);
     downloadLink.click();
     document.body.removeChild(downloadLink);
@@ -60,8 +66,8 @@ const QRManagement = () => {
 
       {/* QR Code Grid */}
       <div className="qr-grid">
-        {filteredTools.map(tool => (
-          <div key={tool.id} className="qr-card">
+        {filteredTools.map((tool, idx) => (
+          <div key={tool.id || `missing-${idx}`} className="qr-card">
             <div className="qr-display">
               {tool.id ? (
                 <QRCodeCanvas
@@ -86,7 +92,12 @@ const QRManagement = () => {
               <p className="tool-loc">Location: {tool.location || '-'}</p>
             </div>
             <div className="qr-actions no-print">
-              <button className="btn-icon" onClick={() => downloadQR(tool.id, tool.name)} title="Download PNG">
+              <button
+                className="btn-icon"
+                onClick={() => downloadQR(tool.id, tool.name)}
+                disabled={!tool.id}
+                title={tool.id ? 'Download PNG' : 'Cannot download without Tool ID'}
+              >
                 <Download size={18} />
               </button>
             </div>

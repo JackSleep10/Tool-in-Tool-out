@@ -1,24 +1,33 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { FileText, Calendar, Download, ChevronLeft, ChevronRight, ShoppingBasket, Wrench } from 'lucide-react';
+import {
+    getTodayDateKey,
+    toBangkokDateKey,
+    shiftDateKey,
+    isDateKeyOlderThanDays,
+    formatThaiDate,
+    formatThaiTime
+} from '../utils/date';
 import './Summary.css';
+
+const csvEscape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 const Summary = () => {
     const { transactions, outstandingTransactions, fetchFullHistory, hasFullHistory, isRefreshing } = useStore();
-    const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+    const [selectedDate, setSelectedDate] = useState(() => getTodayDateKey());
     const [viewMode, setViewMode] = useState('daily'); // 'daily' | 'outstanding'
     const [sortOrder, setSortOrder] = useState('desc'); // 'desc' = Outstanding First, 'asc' = Returned First
 
-    const isOlderThan30Days = useMemo(() => {
-        const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
-        return new Date(selectedDate).getTime() < cutoff;
-    }, [selectedDate]);
+    const isOlderThan30Days = useMemo(
+        () => isDateKeyOlderThanDays(selectedDate, 30),
+        [selectedDate]
+    );
 
-    // Format helpers
-    const formatDate = (dateStr) => {
-        const d = new Date(dateStr);
-        return d.toLocaleDateString('th-TH', { day: '2-digit', month: '2-digit', year: 'numeric' });
-    };
+    const outstandingIdSet = useMemo(
+        () => new Set(outstandingTransactions.map(out => out.id)),
+        [outstandingTransactions]
+    );
 
     const toggleSort = () => {
         setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc');
@@ -26,14 +35,14 @@ const Summary = () => {
 
     // --- Statistics Logic ---
     const stats = useMemo(() => {
-        const dailyTx = transactions.filter(tx => tx.date.startsWith(selectedDate));
+        const dailyTx = transactions.filter(tx => toBangkokDateKey(tx?.date) === selectedDate);
         const borrowTxRaw = dailyTx.filter(tx => tx.action === 'BORROW');
         const returnTx = dailyTx.filter(tx => tx.action === 'RETURN');
 
         // Sort Daily Borrow Log
         const borrowTx = [...borrowTxRaw].sort((a, b) => {
-            const isOutA = outstandingTransactions.some(out => out.id === a.id);
-            const isOutB = outstandingTransactions.some(out => out.id === b.id);
+            const isOutA = outstandingIdSet.has(a.id);
+            const isOutB = outstandingIdSet.has(b.id);
 
             if (sortOrder === 'desc') {
                 if (isOutA && !isOutB) return -1;
@@ -51,7 +60,7 @@ const Summary = () => {
             borrowTx,
             returnTx
         };
-    }, [transactions, selectedDate, outstandingTransactions, sortOrder]);
+    }, [transactions, selectedDate, outstandingIdSet, sortOrder]);
 
     // Outstanding List Logic (Sorted by Date Ascending)
     const sortedOutstanding = useMemo(() => {
@@ -59,26 +68,26 @@ const Summary = () => {
     }, [outstandingTransactions]);
 
     const changeDate = (days) => {
-        const d = new Date(selectedDate);
-        d.setDate(d.getDate() + days);
-        setSelectedDate(d.toISOString().split('T')[0]);
+        setSelectedDate(prev => shiftDateKey(prev, days));
     };
 
     const downloadCSV = () => {
         const dataToExport = viewMode === 'daily' ? stats.borrowTx : sortedOutstanding;
         if (dataToExport.length === 0) return;
 
-        const headers = ['Date', 'Time', 'Tool', 'Employee', 'Staff', 'Status'];
+        const headers = ['Date', 'Time', 'Tool ID', 'Tool Name', 'Employee ID', 'Employee Name', 'Staff', 'Remark', 'Status'];
         const rows = dataToExport.map(tx => {
-            const d = new Date(tx.date);
-            const isOut = outstandingTransactions.some(out => out.id === tx.id);
+            const isOut = outstandingIdSet.has(tx.id);
             return [
-                d.toLocaleDateString('th-TH'),
-                d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }),
-                `"${tx.tool_name}"`,
-                `"${tx.employee_name}"`,
-                `"${tx.staff_issuer || tx.staff_receiver || '-'}"`,
-                isOut ? 'ยังไม่คืน' : 'คืนแล้ว'
+                csvEscape(formatThaiDate(tx.date)),
+                csvEscape(formatThaiTime(tx.date)),
+                csvEscape(tx.tool_id ?? ''),
+                csvEscape(tx.tool_name ?? ''),
+                csvEscape(tx.employee_id ?? ''),
+                csvEscape(tx.employee_name ?? ''),
+                csvEscape(tx.staff_issuer || tx.staff_receiver || '-'),
+                csvEscape(String(tx.remark ?? '').trim() || '-'),
+                csvEscape(isOut ? 'ยังไม่คืน' : 'คืนแล้ว')
             ].join(',');
         });
 
@@ -87,7 +96,7 @@ const Summary = () => {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = `report_${viewMode === 'daily' ? selectedDate : 'outstanding'}_${new Date().toISOString().split('T')[0]}.csv`;
+        link.download = `report_${viewMode === 'daily' ? selectedDate : 'outstanding'}_${getTodayDateKey()}.csv`;
         link.click();
         URL.revokeObjectURL(url);
     };
@@ -117,7 +126,7 @@ const Summary = () => {
                     <div className="report-actions">
                         <div className="date-controls">
                             <button className="icon-btn" onClick={() => changeDate(-1)}><ChevronLeft /></button>
-                            <h2 className="date-display">{formatDate(selectedDate)}</h2>
+                            <h2 className="date-display">{formatThaiDate(selectedDate)}</h2>
                             <button className="icon-btn" onClick={() => changeDate(1)}><ChevronRight /></button>
                         </div>
                         <div className="date-tools-sub">
@@ -126,7 +135,9 @@ const Summary = () => {
                                 <input
                                     type="date"
                                     value={selectedDate}
-                                    onChange={(e) => setSelectedDate(e.target.value)}
+                                    onChange={(e) => {
+                                        if (e.target.value) setSelectedDate(e.target.value);
+                                    }}
                                 />
                             </div>
                             <button className="btn-export" onClick={downloadCSV} title="Export CSV">
@@ -227,14 +238,15 @@ const Summary = () => {
                                             </thead>
                                             <tbody>
                                                 {stats.borrowTx.length > 0 ? stats.borrowTx.map(tx => {
-                                                    const isOutstanding = outstandingTransactions.some(out => out.id === tx.id);
+                                                    const isOutstanding = outstandingIdSet.has(tx.id);
+                                                    const remarkText = String(tx.remark ?? '').trim();
                                                     return (
                                                         <tr key={tx.id}>
-                                                            <td className="time-col">{new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}</td>
+                                                            <td className="time-col">{formatThaiTime(tx.date)}</td>
                                                             <td>
                                                                 <div className="tool-cell">
                                                                     <strong>{tx.tool_name}</strong>
-                                                                    <span className="remark-text">{tx.remark && tx.remark !== '-' ? `(${tx.remark})` : ''}</span>
+                                                                    <span className="remark-text">{remarkText && remarkText !== '-' ? `(${remarkText})` : ''}</span>
                                                                 </div>
                                                             </td>
                                                             <td>{tx.employee_name}</td>
@@ -258,8 +270,9 @@ const Summary = () => {
                                     {/* Mobile Cards View */}
                                     <div className="mobile-cards-view">
                                         {stats.borrowTx.length > 0 ? stats.borrowTx.map(tx => {
-                                            const isOutstanding = outstandingTransactions.some(out => out.id === tx.id);
-                                            const timeStr = new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+                                            const isOutstanding = outstandingIdSet.has(tx.id);
+                                            const timeStr = formatThaiTime(tx.date);
+                                            const remarkText = String(tx.remark ?? '').trim();
                                             return (
                                                 <div key={tx.id} className="mobile-summary-card">
                                                     <div className="m-card-top">
@@ -283,10 +296,10 @@ const Summary = () => {
                                                             <span className="m-label">ผู้จ่ายของ:</span>
                                                             <span className="m-val">{tx.staff_issuer || '-'}</span>
                                                         </div>
-                                                        {tx.remark && tx.remark !== '-' && (
+                                                        {remarkText && remarkText !== '-' && (
                                                             <div className="m-row m-remark-row">
                                                                 <span className="m-label">หมายเหตุ:</span>
-                                                                <span className="m-val">{tx.remark}</span>
+                                                                <span className="m-val">{remarkText}</span>
                                                             </div>
                                                         )}
                                                     </div>
@@ -327,7 +340,7 @@ const Summary = () => {
                                             <tbody>
                                                 {stats.returnTx.length > 0 ? stats.returnTx.map(tx => (
                                                     <tr key={tx.id}>
-                                                        <td className="time-col">{new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}</td>
+                                                        <td className="time-col">{formatThaiTime(tx.date)}</td>
                                                         <td>{tx.tool_name}</td>
                                                         <td>{tx.employee_name}</td>
                                                         <td className="staff-col">{tx.staff_receiver}</td>
@@ -343,7 +356,7 @@ const Summary = () => {
                                     {/* Mobile Cards View */}
                                     <div className="mobile-cards-view">
                                         {stats.returnTx.length > 0 ? stats.returnTx.map(tx => {
-                                            const timeStr = new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+                                            const timeStr = formatThaiTime(tx.date);
                                             return (
                                                 <div key={tx.id} className="mobile-summary-card">
                                                     <div className="m-card-top">
@@ -404,9 +417,9 @@ const Summary = () => {
                                         {sortedOutstanding.length > 0 ? sortedOutstanding.map(tx => (
                                             <tr key={tx.id}>
                                                 <td className="date-col">
-                                                    <strong>{formatDate(tx.date)}</strong>
+                                                    <strong>{formatThaiDate(tx.date)}</strong>
                                                 </td>
-                                                <td className="time-col">{new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}</td>
+                                                <td className="time-col">{formatThaiTime(tx.date)}</td>
                                                 <td>
                                                     <div className="tool-cell">
                                                         <strong>{tx.tool_name}</strong>
@@ -429,7 +442,8 @@ const Summary = () => {
                             {/* Mobile Cards View */}
                             <div className="mobile-cards-view">
                                 {sortedOutstanding.length > 0 ? sortedOutstanding.map(tx => {
-                                    const timeStr = new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+                                    const timeStr = formatThaiTime(tx.date);
+                                    const remarkText = String(tx.remark ?? '').trim();
                                     return (
                                         <div key={tx.id} className="mobile-summary-card is-outstanding">
                                             <div className="m-card-top">
@@ -439,7 +453,7 @@ const Summary = () => {
                                             <div className="m-card-details">
                                                 <div className="m-row">
                                                     <span className="m-label">วันที่ยืม:</span>
-                                                    <span className="m-val date-highlight">{formatDate(tx.date)} ({timeStr} น.)</span>
+                                                    <span className="m-val date-highlight">{formatThaiDate(tx.date)} ({timeStr} น.)</span>
                                                 </div>
                                                 <div className="m-row">
                                                     <span className="m-label">ผู้เบิก:</span>
@@ -449,10 +463,10 @@ const Summary = () => {
                                                     <span className="m-label">ผู้จ่ายของ:</span>
                                                     <span className="m-val">{tx.staff_issuer || '-'}</span>
                                                 </div>
-                                                {tx.remark && tx.remark !== '-' && (
+                                                {remarkText && remarkText !== '-' && (
                                                     <div className="m-row m-remark-row">
                                                         <span className="m-label">หมายเหตุ:</span>
-                                                        <span className="m-val">{tx.remark}</span>
+                                                        <span className="m-val">{remarkText}</span>
                                                     </div>
                                                 )}
                                             </div>

@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import { fetchFromSheet } from '../services/api';
+import { getTodayDateKey, toBangkokDateKey } from '../utils/date';
+import { computeOutstanding, normalizeId } from '../utils/transactions';
 
 const StoreContext = createContext();
 
@@ -47,6 +49,7 @@ export const StoreProvider = ({ children }) => {
 
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [hasFullHistory, setHasFullHistory] = useState(false);
+    const hasFullHistoryRef = useRef(false);
     const [lastSyncTime, setLastSyncTime] = useState(() => {
         try {
             return localStorage.getItem('gse_cache_timestamp') || null;
@@ -74,7 +77,8 @@ export const StoreProvider = ({ children }) => {
         }
         setIsRefreshing(true);
         try {
-            const result = await fetchFromSheet('GET_ALL_DATA');
+            const includeFull = hasFullHistoryRef.current;
+            const result = await fetchFromSheet('GET_ALL_DATA', includeFull ? { full_history: true } : {});
             if (result && result.status === 'success') {
                 const data = result.data;
                 const newEmps = data.employees || [];
@@ -84,7 +88,9 @@ export const StoreProvider = ({ children }) => {
                 setEmployees(newEmps);
                 setTools(newTools);
                 setTransactions(newTxs);
-                setHasFullHistory(!!data.has_full_history);
+                const fullFlag = !!data.has_full_history;
+                hasFullHistoryRef.current = fullFlag;
+                setHasFullHistory(fullFlag);
                 const now = Date.now().toString();
                 setLastSyncTime(now);
 
@@ -109,13 +115,14 @@ export const StoreProvider = ({ children }) => {
     };
 
     const fetchFullHistory = async () => {
-        if (hasFullHistory) return;
+        if (hasFullHistoryRef.current) return;
         setIsRefreshing(true);
         try {
             const result = await fetchFromSheet('GET_FULL_HISTORY');
             if (result && result.status === 'success') {
                 const fullTxs = result.data.transactions || [];
                 setTransactions(fullTxs);
+                hasFullHistoryRef.current = true;
                 setHasFullHistory(true);
                 try {
                     localStorage.setItem('gse_cache_transactions', JSON.stringify(fullTxs));
@@ -130,44 +137,22 @@ export const StoreProvider = ({ children }) => {
         }
     };
 
-    /**
-     * Calculate Outstanding Logic (Replay History)
-     */
-    const calculateOutstanding = () => {
-        if (!transactions || transactions.length === 0) return [];
-
-        const sorted = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
-        let currentOutstanding = [];
-
-        sorted.forEach(tx => {
-            if (tx.action === 'BORROW') {
-                currentOutstanding.push(tx);
-            } else if (tx.action === 'RETURN') {
-                // Find a match by Tool ID and Employee ID
-                const index = currentOutstanding.findIndex(item =>
-                    item.tool_id === tx.tool_id &&
-                    item.employee_id === tx.employee_id
-                );
-
-                if (index !== -1) {
-                    currentOutstanding.splice(index, 1);
-                }
-            }
-        });
-
-        return currentOutstanding.reverse();
-    };
-
-    const realOutstanding = useMemo(() => calculateOutstanding(), [transactions]);
+    const realOutstanding = useMemo(() => {
+        const { outstandingList } = computeOutstanding(transactions);
+        return [...outstandingList].reverse();
+    }, [transactions]);
 
     // Helper: Is this specific physical tool currently borrowed by ANYONE?
     const isToolCurrentlyOut = (toolId) => {
-        return realOutstanding.some(tx => tx.tool_id === toolId);
+        const target = normalizeId(toolId);
+        return target !== '' && realOutstanding.some(tx => normalizeId(tx.tool_id) === target);
     };
 
     // Helper: Who has this tool? (optional metadata)
     const getToolBorrower = (toolId) => {
-        return realOutstanding.find(tx => tx.tool_id === toolId);
+        const target = normalizeId(toolId);
+        if (!target) return undefined;
+        return realOutstanding.find(tx => normalizeId(tx.tool_id) === target);
     };
 
     // Actions
@@ -227,10 +212,10 @@ export const StoreProvider = ({ children }) => {
 
     const markUnserviceable = async (toolId, reason, markedBy) => {
         let previousTool = null;
-        const targetId = toolId?.toString().toLowerCase();
+        const targetId = normalizeId(toolId);
 
         setTools(prev => prev.map(t => {
-            if (t.id?.toString().toLowerCase() === targetId) {
+            if (targetId && normalizeId(t.id) === targetId) {
                 previousTool = t;
                 return {
                     ...t,
@@ -262,10 +247,10 @@ export const StoreProvider = ({ children }) => {
 
     const markServiceable = async (toolId) => {
         let previousTool = null;
-        const targetId = toolId?.toString().toLowerCase();
+        const targetId = normalizeId(toolId);
 
         setTools(prev => prev.map(t => {
-            if (t.id?.toString().toLowerCase() === targetId) {
+            if (targetId && normalizeId(t.id) === targetId) {
                 previousTool = t;
                 return {
                     ...t,
@@ -295,14 +280,11 @@ export const StoreProvider = ({ children }) => {
 
     const getStats = () => {
         if (loading && !tools.length) return { borrowedToday: 0, returnedToday: 0, outstanding: 0, unserviceable: 0 };
-        const today = new Date().toISOString().split('T')[0];
-        const todayTx = transactions.filter(t => {
-            try { return new Date(t.date).toISOString().startsWith(today); }
-            catch (e) { return false; }
-        });
+        const today = getTodayDateKey();
+        const todayTx = transactions.filter(t => toBangkokDateKey(t?.date) === today);
 
         const unserviceableCount = tools.filter(t =>
-            (t.serviceability_status || '').toUpperCase() === 'UNSERVICEABLE'
+            String(t.serviceability_status ?? '').toUpperCase() === 'UNSERVICEABLE'
         ).length;
 
         return {

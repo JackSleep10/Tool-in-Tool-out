@@ -7053,6 +7053,147 @@ const fetchFromSheet = async (action, payload = {}) => {
     throw error;
   }
 };
+const STORE_TIMEZONE = "Asia/Bangkok";
+const bangkokDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: STORE_TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+const thaiDateFormatter = new Intl.DateTimeFormat("th-TH", {
+  timeZone: STORE_TIMEZONE,
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric"
+});
+const thaiShortDateFormatter = new Intl.DateTimeFormat("th-TH", {
+  timeZone: STORE_TIMEZONE,
+  day: "2-digit",
+  month: "2-digit",
+  year: "2-digit"
+});
+const thaiTimeFormatter = new Intl.DateTimeFormat("th-TH", {
+  timeZone: STORE_TIMEZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false
+});
+const utcThaiDateFormatter = new Intl.DateTimeFormat("th-TH", {
+  timeZone: "UTC",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric"
+});
+const DATE_KEY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+function parseValidDate(value) {
+  if (value === null || value === void 0 || value === "") return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+function toBangkokDateKey(value) {
+  var _a, _b, _c;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (DATE_KEY_RE.test(trimmed)) return trimmed;
+  }
+  const d = parseValidDate(value);
+  if (!d) return "";
+  const parts = bangkokDateFormatter.formatToParts(d);
+  const year = (_a = parts.find((p2) => p2.type === "year")) == null ? void 0 : _a.value;
+  const month = (_b = parts.find((p2) => p2.type === "month")) == null ? void 0 : _b.value;
+  const day = (_c = parts.find((p2) => p2.type === "day")) == null ? void 0 : _c.value;
+  if (!year || !month || !day) return "";
+  return `${year}-${month}-${day}`;
+}
+function getTodayDateKey() {
+  return toBangkokDateKey(/* @__PURE__ */ new Date());
+}
+function shiftDateKey(dateKey, days) {
+  const match = DATE_KEY_RE.exec(String(dateKey ?? "").trim());
+  if (!match) return getTodayDateKey();
+  const y2 = Number(match[1]);
+  const m2 = Number(match[2]) - 1;
+  const d = Number(match[3]) + days;
+  const shifted = new Date(Date.UTC(y2, m2, d));
+  const yy = String(shifted.getUTCFullYear()).padStart(4, "0");
+  const mm = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const dd2 = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd2}`;
+}
+function isDateKeyOlderThanDays(dateKey, days) {
+  const normalized = toBangkokDateKey(dateKey);
+  if (!normalized) return false;
+  const cutoffKey = shiftDateKey(getTodayDateKey(), -30);
+  return normalized < cutoffKey;
+}
+function formatThaiDate(value) {
+  if (typeof value === "string") {
+    const match = DATE_KEY_RE.exec(value.trim());
+    if (match) {
+      const utcMidnight = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+      return utcThaiDateFormatter.format(utcMidnight);
+    }
+  }
+  const d = parseValidDate(value);
+  return d ? thaiDateFormatter.format(d) : "-";
+}
+function formatThaiTime(value) {
+  const d = parseValidDate(value);
+  return d ? thaiTimeFormatter.format(d) : "-";
+}
+function formatThaiDateTime(value, { shortYear = false } = {}) {
+  const d = parseValidDate(value);
+  if (!d) return "-";
+  const datePart = shortYear ? thaiShortDateFormatter.format(d) : thaiDateFormatter.format(d);
+  return `${datePart} ${thaiTimeFormatter.format(d)}`;
+}
+function normalizeId(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+function computeOutstanding(transactions) {
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return { outstandingList: [], returnToBorrowMap: {} };
+  }
+  const sorted = [...transactions].sort((a, b) => {
+    const ta2 = new Date(a == null ? void 0 : a.date).getTime();
+    const tb2 = new Date(b == null ? void 0 : b.date).getTime();
+    const na = Number.isNaN(ta2) ? 0 : ta2;
+    const nb2 = Number.isNaN(tb2) ? 0 : tb2;
+    return na - nb2;
+  });
+  const outstandingList = [];
+  const returnToBorrowMap = {};
+  for (let i = 0; i < sorted.length; i++) {
+    const tx = sorted[i];
+    if (!tx) continue;
+    if (tx.action === "BORROW") {
+      outstandingList.push(tx);
+    } else if (tx.action === "RETURN") {
+      const linkedId = normalizeId(tx.linked_borrow_id);
+      let idx = -1;
+      if (linkedId && linkedId !== "-") {
+        idx = outstandingList.findIndex((item) => {
+          const itemId = normalizeId(item.id);
+          return itemId !== "" && itemId === linkedId;
+        });
+      }
+      if (idx === -1) {
+        const toolId = normalizeId(tx.tool_id);
+        const empId = normalizeId(tx.employee_id);
+        idx = outstandingList.findIndex(
+          (item) => normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId
+        );
+      }
+      if (idx !== -1) {
+        const [matchedBorrow] = outstandingList.splice(idx, 1);
+        if (tx.id && matchedBorrow.id) {
+          returnToBorrowMap[tx.id] = matchedBorrow.id;
+        }
+      }
+    }
+  }
+  return { outstandingList, returnToBorrowMap };
+}
 const StoreContext = reactExports.createContext();
 const useStore = () => reactExports.useContext(StoreContext);
 const StoreProvider = ({ children }) => {
@@ -7091,6 +7232,7 @@ const StoreProvider = ({ children }) => {
   });
   const [isRefreshing, setIsRefreshing] = reactExports.useState(false);
   const [hasFullHistory, setHasFullHistory] = reactExports.useState(false);
+  const hasFullHistoryRef = reactExports.useRef(false);
   const [lastSyncTime, setLastSyncTime] = reactExports.useState(() => {
     try {
       return localStorage.getItem("gse_cache_timestamp") || null;
@@ -7113,7 +7255,8 @@ const StoreProvider = ({ children }) => {
     }
     setIsRefreshing(true);
     try {
-      const result = await fetchFromSheet("GET_ALL_DATA");
+      const includeFull = hasFullHistoryRef.current;
+      const result = await fetchFromSheet("GET_ALL_DATA", includeFull ? { full_history: true } : {});
       if (result && result.status === "success") {
         const data = result.data;
         const newEmps = data.employees || [];
@@ -7122,7 +7265,9 @@ const StoreProvider = ({ children }) => {
         setEmployees(newEmps);
         setTools(newTools);
         setTransactions(newTxs);
-        setHasFullHistory(!!data.has_full_history);
+        const fullFlag = !!data.has_full_history;
+        hasFullHistoryRef.current = fullFlag;
+        setHasFullHistory(fullFlag);
         const now = Date.now().toString();
         setLastSyncTime(now);
         try {
@@ -7144,13 +7289,14 @@ const StoreProvider = ({ children }) => {
     }
   };
   const fetchFullHistory = async () => {
-    if (hasFullHistory) return;
+    if (hasFullHistoryRef.current) return;
     setIsRefreshing(true);
     try {
       const result = await fetchFromSheet("GET_FULL_HISTORY");
       if (result && result.status === "success") {
         const fullTxs = result.data.transactions || [];
         setTransactions(fullTxs);
+        hasFullHistoryRef.current = true;
         setHasFullHistory(true);
         try {
           localStorage.setItem("gse_cache_transactions", JSON.stringify(fullTxs));
@@ -7164,30 +7310,18 @@ const StoreProvider = ({ children }) => {
       setIsRefreshing(false);
     }
   };
-  const calculateOutstanding = () => {
-    if (!transactions || transactions.length === 0) return [];
-    const sorted = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
-    let currentOutstanding = [];
-    sorted.forEach((tx) => {
-      if (tx.action === "BORROW") {
-        currentOutstanding.push(tx);
-      } else if (tx.action === "RETURN") {
-        const index = currentOutstanding.findIndex(
-          (item) => item.tool_id === tx.tool_id && item.employee_id === tx.employee_id
-        );
-        if (index !== -1) {
-          currentOutstanding.splice(index, 1);
-        }
-      }
-    });
-    return currentOutstanding.reverse();
-  };
-  const realOutstanding = reactExports.useMemo(() => calculateOutstanding(), [transactions]);
+  const realOutstanding = reactExports.useMemo(() => {
+    const { outstandingList } = computeOutstanding(transactions);
+    return [...outstandingList].reverse();
+  }, [transactions]);
   const isToolCurrentlyOut = (toolId) => {
-    return realOutstanding.some((tx) => tx.tool_id === toolId);
+    const target = normalizeId(toolId);
+    return target !== "" && realOutstanding.some((tx) => normalizeId(tx.tool_id) === target);
   };
   const getToolBorrower = (toolId) => {
-    return realOutstanding.find((tx) => tx.tool_id === toolId);
+    const target = normalizeId(toolId);
+    if (!target) return void 0;
+    return realOutstanding.find((tx) => normalizeId(tx.tool_id) === target);
   };
   const addTransaction = async (transactionData) => {
     const tempId = `temp_${Date.now()}`;
@@ -7238,10 +7372,9 @@ const StoreProvider = ({ children }) => {
   };
   const markUnserviceable = async (toolId, reason, markedBy) => {
     let previousTool = null;
-    const targetId = toolId == null ? void 0 : toolId.toString().toLowerCase();
+    const targetId = normalizeId(toolId);
     setTools((prev) => prev.map((t2) => {
-      var _a;
-      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === targetId) {
+      if (targetId && normalizeId(t2.id) === targetId) {
         previousTool = t2;
         return {
           ...t2,
@@ -7271,10 +7404,9 @@ const StoreProvider = ({ children }) => {
   };
   const markServiceable = async (toolId) => {
     let previousTool = null;
-    const targetId = toolId == null ? void 0 : toolId.toString().toLowerCase();
+    const targetId = normalizeId(toolId);
     setTools((prev) => prev.map((t2) => {
-      var _a;
-      if (((_a = t2.id) == null ? void 0 : _a.toString().toLowerCase()) === targetId) {
+      if (targetId && normalizeId(t2.id) === targetId) {
         previousTool = t2;
         return {
           ...t2,
@@ -7302,16 +7434,10 @@ const StoreProvider = ({ children }) => {
   };
   const getStats = () => {
     if (loading && !tools.length) return { borrowedToday: 0, returnedToday: 0, outstanding: 0, unserviceable: 0 };
-    const today = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
-    const todayTx = transactions.filter((t2) => {
-      try {
-        return new Date(t2.date).toISOString().startsWith(today);
-      } catch (e) {
-        return false;
-      }
-    });
+    const today = getTodayDateKey();
+    const todayTx = transactions.filter((t2) => toBangkokDateKey(t2 == null ? void 0 : t2.date) === today);
     const unserviceableCount = tools.filter(
-      (t2) => (t2.serviceability_status || "").toUpperCase() === "UNSERVICEABLE"
+      (t2) => String(t2.serviceability_status ?? "").toUpperCase() === "UNSERVICEABLE"
     ).length;
     return {
       borrowedToday: todayTx.filter((t2) => t2.action === "BORROW").length,
@@ -8103,15 +8229,7 @@ const Layout = ({ children, activeTab, onTabChange }) => {
 const Dashboard = () => {
   const { getStats, outstandingTransactions, tools } = useStore();
   const stats = getStats();
-  const formatDate = (isoString) => {
-    return new Date(isoString).toLocaleString("th-TH", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
-  };
+  const formatDate = (isoString) => formatThaiDateTime(isoString, { shortYear: true });
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "dashboard", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stats-grid", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card primary", children: [
@@ -8152,7 +8270,7 @@ const Dashboard = () => {
         /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "📦 รายการค้างส่ง (Outstanding Items)" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "timestamp", children: [
           "Updated: ",
-          (/* @__PURE__ */ new Date()).toLocaleTimeString("th-TH")
+          (/* @__PURE__ */ new Date()).toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok" })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "table-container", children: outstandingTransactions.length > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -8167,16 +8285,16 @@ const Dashboard = () => {
           ] }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: outstandingTransactions.map((tx) => {
             var _a;
+            const txToolId = normalizeId(tx.tool_id);
+            const loc = txToolId ? ((_a = tools.find((t2) => normalizeId(t2.id) === txToolId)) == null ? void 0 : _a.location) || "-" : "-";
+            const remarkText = String(tx.remark ?? "").trim();
             return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: formatDate(tx.date) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "tool-info", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "tool-name", children: tx.tool_name }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "tool-id", children: [
                   "Location: ",
-                  ((_a = tools.find((t2) => {
-                    var _a2, _b;
-                    return ((_a2 = t2.id) == null ? void 0 : _a2.toString().toLowerCase()) === ((_b = tx.tool_id) == null ? void 0 : _b.toString().toLowerCase());
-                  })) == null ? void 0 : _a.location) || "-"
+                  loc
                 ] })
               ] }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "emp-info", children: [
@@ -8184,7 +8302,7 @@ const Dashboard = () => {
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "emp-id", children: tx.employee_id })
               ] }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: tx.staff_issuer }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "remark-text", children: tx.remark || "-" }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "remark-text", children: remarkText || "-" }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: (() => {
                 const hoursOut = (Date.now() - new Date(tx.date).getTime()) / (1e3 * 60 * 60);
                 return hoursOut > 24 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "status-badge overdue", title: `ค้างคืน ${Math.floor(hoursOut)} ชม.`, children: [
@@ -8198,12 +8316,11 @@ const Dashboard = () => {
         ] }) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: outstandingTransactions.map((tx) => {
           var _a;
-          const loc = ((_a = tools.find((t2) => {
-            var _a2, _b;
-            return ((_a2 = t2.id) == null ? void 0 : _a2.toString().toLowerCase()) === ((_b = tx.tool_id) == null ? void 0 : _b.toString().toLowerCase());
-          })) == null ? void 0 : _a.location) || "-";
+          const txToolId = normalizeId(tx.tool_id);
+          const loc = txToolId ? ((_a = tools.find((t2) => normalizeId(t2.id) === txToolId)) == null ? void 0 : _a.location) || "-" : "-";
           const hoursOut = (Date.now() - new Date(tx.date).getTime()) / (1e3 * 60 * 60);
           const isOverdue = hoursOut > 24;
+          const remarkText = String(tx.remark ?? "").trim();
           return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `mobile-out-card ${isOverdue ? "is-overdue" : ""}`, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-out-header", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-out-tool", children: [
@@ -8240,9 +8357,9 @@ const Dashboard = () => {
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "info-label", children: "เวลาที่เบิก:" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "info-val time-highlight", children: formatDate(tx.date) })
               ] }),
-              tx.remark && tx.remark !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-info-row remark-row", children: [
+              remarkText && remarkText !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-info-row remark-row", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "info-label", children: "หมายเหตุ:" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "info-val remark-val", children: tx.remark })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "info-val remark-val", children: remarkText })
               ] })
             ] })
           ] }, tx.id);
@@ -36103,6 +36220,77 @@ var Html5QrcodeScannerStatus;
   Html5QrcodeScannerStatus2[Html5QrcodeScannerStatus2["STATUS_WARNING"] = 2] = "STATUS_WARNING";
   Html5QrcodeScannerStatus2[Html5QrcodeScannerStatus2["STATUS_REQUESTING_PERMISSION"] = 3] = "STATUS_REQUESTING_PERMISSION";
 })(Html5QrcodeScannerStatus || (Html5QrcodeScannerStatus = {}));
+function useQrScanner({ elementId, onScan, onError }) {
+  const [isScanning, setIsScanning] = reactExports.useState(false);
+  const scannerRef = reactExports.useRef(null);
+  const onScanRef = reactExports.useRef(onScan);
+  const onErrorRef = reactExports.useRef(onError);
+  onScanRef.current = onScan;
+  onErrorRef.current = onError;
+  const stopScanning = reactExports.useCallback(() => {
+    setIsScanning(false);
+  }, []);
+  const startScanning = reactExports.useCallback(() => {
+    setIsScanning(true);
+  }, []);
+  reactExports.useEffect(() => {
+    if (!isScanning) return void 0;
+    let cancelled = false;
+    let instance = null;
+    let handled = false;
+    const cleanupInstance = (target) => {
+      if (!target) return;
+      const stopPromise = target.isScanning ? target.stop() : Promise.resolve();
+      stopPromise.then(() => {
+        try {
+          target.clear();
+        } catch (_) {
+        }
+      }).catch(() => {
+      });
+    };
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      const container = document.getElementById(elementId);
+      if (!container) return;
+      instance = new Html5Qrcode(elementId);
+      scannerRef.current = instance;
+      instance.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        (decodedText) => {
+          if (cancelled || handled) return;
+          if (!decodedText || !decodedText.trim()) return;
+          handled = true;
+          if (onScanRef.current) {
+            onScanRef.current(decodedText.trim(), () => setIsScanning(false));
+          }
+        },
+        () => {
+        }
+      ).then(() => {
+        if (cancelled) {
+          cleanupInstance(instance);
+        }
+      }).catch((err) => {
+        if (!cancelled) {
+          setIsScanning(false);
+          if (onErrorRef.current) {
+            onErrorRef.current(err);
+          }
+        }
+      });
+    }, 50);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      const target = scannerRef.current || instance;
+      scannerRef.current = null;
+      cleanupInstance(target);
+    };
+  }, [isScanning, elementId]);
+  return { isScanning, startScanning, stopScanning };
+}
 const Modal = ({ isOpen, onClose, title, message, type = "info", onConfirm, confirmText = "ตกลง", cancelText = "ยกเลิก" }) => {
   if (!isOpen) return null;
   const getIcon = () => {
@@ -36149,8 +36337,6 @@ const BorrowForm = () => {
   const [remark, setRemark] = reactExports.useState("");
   const [empSearch, setEmpSearch] = reactExports.useState("");
   const [toolSearch, setToolSearch] = reactExports.useState("");
-  const [isScanning, setIsScanning] = reactExports.useState(false);
-  const [scanner, setScanner] = reactExports.useState(null);
   const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
@@ -36168,7 +36354,7 @@ const BorrowForm = () => {
   const matchSearch2 = (item, searchStr, fields) => {
     if (!searchStr || !searchStr.trim()) return true;
     const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-    const text = fields.map((f2) => (item[f2] || "").toString().toLowerCase()).join(" ");
+    const text = fields.map((f2) => String(item[f2] ?? "").toLowerCase()).join(" ");
     return tokens.every((token) => text.includes(token));
   };
   const filteredEmployees = employees.filter(
@@ -36179,41 +36365,48 @@ const BorrowForm = () => {
   ).slice(0, 20);
   const isToolUnserviceable = (tool) => {
     if (!tool) return false;
-    const status = (tool.serviceability_status || tool.status || "").toString().trim().toUpperCase();
+    const status = String(tool.serviceability_status || tool.status || "").trim().toUpperCase();
     return status === "UNSERVICEABLE" || status === "U/S" || status.includes("UNSERVICE") || status.includes("ชำรุด");
   };
   const addToBasket = (tool) => {
+    if (!tool) return false;
     if (isToolUnserviceable(tool)) {
       showModal("error", "⛔ อุปกรณ์ชำรุด (U/S)", `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้
 สาเหตุ: ${tool.unserviceable_reason || "ไม่ระบุ"}`);
-      return;
+      return false;
     }
-    if (basket.some((t2) => t2.id === tool.id)) {
+    const targetId = normalizeId(tool.id);
+    if (basket.some((t2) => targetId ? normalizeId(t2.id) === targetId : t2.id === tool.id)) {
       showModal("error", "ข้อผิดพลาด", "อุปกรณ์นี้มีอยู่ในตะกร้าแล้ว");
-      return;
+      return false;
     }
     if (isToolCurrentlyOut(tool.id)) {
       const borrower = getToolBorrower(tool.id);
       showModal(
         "confirm",
         "อุปกรณ์ยังไม่ได้คืน",
-        `"${tool.name}" อยู่กับ ${borrower.employee_name} (${borrower.employee_id}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
+        `"${tool.name}" อยู่กับ ${(borrower == null ? void 0 : borrower.employee_name) || "-"} (${(borrower == null ? void 0 : borrower.employee_id) || "-"}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
         async () => {
           if (isSubmitting) return;
+          const trimmedIssuer = issuerName.trim();
+          const receiver = trimmedIssuer || "Auto-Return";
           setIsSubmitting(true);
           try {
             await addBatchTransactions([{
               action: "RETURN",
               tool_id: tool.id,
               tool_name: tool.name,
-              employee_id: borrower.employee_id,
-              employee_name: borrower.employee_name,
+              employee_id: (borrower == null ? void 0 : borrower.employee_id) || "",
+              employee_name: (borrower == null ? void 0 : borrower.employee_name) || "",
               quantity: 1,
-              staff_issuer: borrower.staff_issuer,
-              staff_receiver: "Auto-Return",
-              linked_borrow_id: borrower.id,
+              staff_issuer: (borrower == null ? void 0 : borrower.staff_issuer) || "-",
+              staff_receiver: receiver,
+              linked_borrow_id: (borrower == null ? void 0 : borrower.id) || "",
               remark: "คืนอัตโนมัติเพื่อยืมต่อ"
             }]);
+            if (trimmedIssuer) {
+              localStorage.setItem("staffIssuerName", trimmedIssuer);
+            }
             setBasket((prev) => [...prev, tool]);
             setToolSearch("");
             showModal("success", "รับคืนสำเร็จ", `รับคืน "${tool.name}" และเพิ่มลงในตะกร้าแล้ว`);
@@ -36224,17 +36417,16 @@ const BorrowForm = () => {
           }
         }
       );
-      return;
+      return false;
     }
-    setBasket([...basket, tool]);
+    setBasket((prev) => [...prev, tool]);
     setToolSearch("");
+    return true;
   };
   const processToolSearch = (searchValue) => {
-    const cleanSearch = searchValue.trim().toLowerCase();
+    const cleanSearch = normalizeId(searchValue);
     if (!cleanSearch) return;
-    const exactMatch = tools.find(
-      (t2) => (t2.id || "").toString().toLowerCase() === cleanSearch
-    );
+    const exactMatch = tools.find((t2) => normalizeId(t2.id) === cleanSearch);
     if (exactMatch) {
       addToBasket(exactMatch);
     }
@@ -36245,62 +36437,31 @@ const BorrowForm = () => {
       processToolSearch(toolSearch);
     }
   };
-  const startScanning = async () => {
-    setIsScanning(true);
-    setTimeout(() => {
-      const html5QrCode = new Html5Qrcode("reader");
-      setScanner(html5QrCode);
-      html5QrCode.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 }
-        },
-        (decodedText) => {
-          if (!decodedText || !decodedText.trim()) return;
-          const scannedId = decodedText.trim().toLowerCase();
-          const tool = tools.find(
-            (t2) => t2.id.toString().trim().toLowerCase() === scannedId
-          );
-          if (tool) {
-            if (isToolUnserviceable(tool)) {
-              stopScanning(html5QrCode);
-              showModal("error", "⛔ อุปกรณ์ชำรุด (U/S)", `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้
-สาเหตุ: ${tool.unserviceable_reason || "ไม่ระบุ"}`);
-            } else {
-              addToBasket(tool);
-              stopScanning(html5QrCode);
-              showModal("success", "สแกนสำเร็จ", `เพิ่ม "${tool.name}" ลงในตะกร้าแล้ว`);
-            }
-          } else {
-            showModal("error", "ไม่พบข้อมูล", `ไม่พบอุปกรณ์รหัส "${decodedText}" ในระบบ`);
-          }
-        },
-        (errorMessage) => {
+  const { isScanning, startScanning, stopScanning } = useQrScanner({
+    elementId: "reader",
+    onScan: (decodedText, stop) => {
+      stop();
+      const scannedId = normalizeId(decodedText);
+      const tool = scannedId ? tools.find((t2) => normalizeId(t2.id) === scannedId) : null;
+      if (tool) {
+        const added = addToBasket(tool);
+        if (added) {
+          showModal("success", "สแกนสำเร็จ", `เพิ่ม "${tool.name}" ลงในตะกร้าแล้ว`);
         }
-      ).catch((err) => {
-        showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
-        setIsScanning(false);
-      });
-    }, 100);
-  };
-  const stopScanning = (scannerInstance = scanner) => {
-    if (scannerInstance && scannerInstance.isScanning) {
-      scannerInstance.stop().then(() => {
-        scannerInstance.clear();
-        setIsScanning(false);
-        setScanner(null);
-      }).catch((err) => console.error(err));
-    } else {
-      setIsScanning(false);
-      setScanner(null);
+      } else {
+        showModal("error", "ไม่พบข้อมูล", `ไม่พบอุปกรณ์รหัส "${decodedText}" ในระบบ`);
+      }
+    },
+    onError: (err) => {
+      showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
     }
-  };
+  });
   const removeFromBasket = (toolId) => {
-    setBasket(basket.filter((t2) => t2.id !== toolId));
+    setBasket((prev) => prev.filter((t2) => t2.id !== toolId));
   };
   const handleSubmit = () => {
     if (isSubmitting) return;
+    const trimmedIssuer = issuerName.trim();
     if (!selectedEmployee) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อพนักงานผู้ยืม");
       return;
@@ -36309,7 +36470,7 @@ const BorrowForm = () => {
       showModal("error", "แจ้งเตือน", "กรุณาเลือกอุปกรณ์อย่างน้อย 1 ชิ้น");
       return;
     }
-    if (!issuerName) {
+    if (!trimmedIssuer) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้จ่ายของ (Staff Issuer)");
       return;
     }
@@ -36321,7 +36482,7 @@ const BorrowForm = () => {
     const unavailable = basket.find((tool) => isToolCurrentlyOut(tool.id));
     if (unavailable) {
       const borrower = getToolBorrower(unavailable.id);
-      showModal("error", "พบปัญหาในการบันทึก", `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${borrower.employee_name} โปรดนำออกจากตะกร้าก่อนบันทึก`);
+      showModal("error", "พบปัญหาในการบันทึก", `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${(borrower == null ? void 0 : borrower.employee_name) || "-"} โปรดนำออกจากตะกร้าก่อนบันทึก`);
       return;
     }
     showModal("confirm", "ยืนยันการทำรายการ", `ต้องการบันทึกการยืมจำนวน ${basket.length} รายการ?`, async () => {
@@ -36333,7 +36494,7 @@ const BorrowForm = () => {
         employee_id: selectedEmployee.id,
         employee_name: selectedEmployee.name,
         quantity: 1,
-        staff_issuer: issuerName,
+        staff_issuer: trimmedIssuer,
         staff_receiver: "-",
         remark
       }));
@@ -36344,7 +36505,7 @@ const BorrowForm = () => {
         setSelectedEmployee(null);
         setEmpSearch("");
         setRemark("");
-        localStorage.setItem("staffIssuerName", issuerName);
+        localStorage.setItem("staffIssuerName", trimmedIssuer);
         showModal("success", "สำเร็จ", "บันทึกรายการยืมเรียบร้อยแล้ว");
       } catch (err) {
         showModal("error", "บันทึกไม่สำเร็จ", err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่");
@@ -36400,7 +36561,7 @@ const BorrowForm = () => {
               }
             )
           ] }),
-          empSearch && !selectedEmployee && filteredEmployees.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions", children: filteredEmployees.map((emp) => /* @__PURE__ */ jsxRuntimeExports.jsxs("li", { onClick: () => {
+          empSearch && !selectedEmployee && filteredEmployees.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions", children: filteredEmployees.map((emp, idx) => /* @__PURE__ */ jsxRuntimeExports.jsxs("li", { onClick: () => {
             setSelectedEmployee(emp);
             setEmpSearch(emp.name);
           }, children: [
@@ -36411,7 +36572,7 @@ const BorrowForm = () => {
               emp.id,
               ")"
             ] })
-          ] }, emp.name)) })
+          ] }, emp.id || `${emp.name}-${idx}`)) })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "form-group relative", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "เลือกอุปกรณ์ (Select Tools)" }),
@@ -36430,6 +36591,7 @@ const BorrowForm = () => {
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "button",
               {
+                type: "button",
                 className: "scan-btn-inline",
                 onClick: startScanning,
                 title: "สแกน QR Code",
@@ -36440,12 +36602,12 @@ const BorrowForm = () => {
           isScanning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "scanner-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "scanner-container", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "scanner-header", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { children: "Scan Tool QR Code" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => stopScanning(), className: "close-scanner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 20 }) })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", onClick: () => stopScanning(), className: "close-scanner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 20 }) })
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "reader" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "scanner-tip", children: "วาง QR Code ให้อยู่ในกรอบเพื่อสแกน" })
           ] }) }),
-          toolSearch && filteredTools.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions", children: filteredTools.map((tool) => {
+          toolSearch && filteredTools.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions", children: filteredTools.map((tool, idx) => {
             const isOut = isToolCurrentlyOut(tool.id);
             const isUS = isToolUnserviceable(tool);
             return /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -36472,7 +36634,7 @@ const BorrowForm = () => {
                   ] })
                 ] })
               },
-              tool.id
+              tool.id || `${tool.name}-${idx}`
             );
           }) })
         ] }),
@@ -36503,7 +36665,7 @@ const BorrowForm = () => {
             /* @__PURE__ */ jsxRuntimeExports.jsx("small", { children: item.location })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => removeFromBasket(item.id), className: "remove-btn", children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 16 }) })
-        ] }, idx)) }),
+        ] }, item.id || idx)) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "action-area", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "submit-btn", onClick: handleSubmit, disabled: isSubmitting, children: isSubmitting ? "กำลังบันทึก..." : "บันทึกการยืม" }) })
       ] })
     ] })
@@ -36514,8 +36676,6 @@ const ReturnForm = () => {
   const [receiverName, setReceiverName] = reactExports.useState(localStorage.getItem("staffReceiverName") || "");
   const [searchTerm, setSearchTerm] = reactExports.useState("");
   const [selectedIds, setSelectedIds] = reactExports.useState([]);
-  const [isScanning, setIsScanning] = reactExports.useState(false);
-  const [scanner, setScanner] = reactExports.useState(null);
   const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
@@ -36540,7 +36700,7 @@ const ReturnForm = () => {
       tx.employee_id,
       tx.staff_issuer,
       tx.remark
-    ].map((val) => (val || "").toString().toLowerCase()).join(" ");
+    ].map((val) => String(val ?? "").toLowerCase()).join(" ");
     return tokens.every((token) => text.includes(token));
   });
   const toggleSelect = (id2) => {
@@ -36556,10 +36716,10 @@ const ReturnForm = () => {
     }
   };
   const processSearch = (value) => {
-    const cleanId = value.trim().toLowerCase();
+    const cleanId = normalizeId(value);
     if (!cleanId) return;
     const relevantTxs = outstandingTransactions.filter(
-      (tx) => (tx.tool_id || "").toString().trim().toLowerCase() === cleanId
+      (tx) => normalizeId(tx.tool_id) === cleanId
     );
     if (relevantTxs.length > 0) {
       const newIds = relevantTxs.map((tx) => tx.id);
@@ -36573,62 +36733,32 @@ const ReturnForm = () => {
       processSearch(searchTerm);
     }
   };
-  const startScanning = async () => {
-    setIsScanning(true);
-    setTimeout(() => {
-      const html5QrCode = new Html5Qrcode("reader-return");
-      setScanner(html5QrCode);
-      html5QrCode.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 250, height: 250 }
-        },
-        (decodedText) => {
-          if (!decodedText || !decodedText.trim()) return;
-          const scannedId = decodedText.trim().toLowerCase();
-          const relevantTxs = outstandingTransactions.filter(
-            (tx) => tx.tool_id.toString().trim().toLowerCase() === scannedId
-          );
-          if (relevantTxs.length > 0) {
-            const newIds = relevantTxs.map((tx) => tx.id);
-            setSelectedIds((prev) => {
-              const combined = [.../* @__PURE__ */ new Set([...prev, ...newIds])];
-              return combined;
-            });
-            stopScanning(html5QrCode);
-          } else {
-            showModal("error", "ไม่พบข้อมูล", `ไม่พบรายการค้างส่งสำหรับอุปกรณ์รหัส "${decodedText}"`);
-          }
-        },
-        (errorMessage) => {
-        }
-      ).catch((err) => {
-        showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
-        setIsScanning(false);
-      });
-    }, 100);
-  };
-  const stopScanning = (scannerInstance = scanner) => {
-    if (scannerInstance && scannerInstance.isScanning) {
-      scannerInstance.stop().then(() => {
-        scannerInstance.clear();
-        setIsScanning(false);
-        setScanner(null);
-      }).catch((err) => console.error(err));
-    } else {
-      setIsScanning(false);
-      setScanner(null);
+  const { isScanning, startScanning, stopScanning } = useQrScanner({
+    elementId: "reader-return",
+    onScan: (decodedText, stop) => {
+      stop();
+      const scannedId = normalizeId(decodedText);
+      const relevantTxs = scannedId ? outstandingTransactions.filter((tx) => normalizeId(tx.tool_id) === scannedId) : [];
+      if (relevantTxs.length > 0) {
+        const newIds = relevantTxs.map((tx) => tx.id);
+        setSelectedIds((prev) => [.../* @__PURE__ */ new Set([...prev, ...newIds])]);
+      } else {
+        showModal("error", "ไม่พบข้อมูล", `ไม่พบรายการค้างส่งสำหรับอุปกรณ์รหัส "${decodedText}"`);
+      }
+    },
+    onError: (err) => {
+      showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
     }
-  };
+  });
   const handleReturnClick = (tx) => {
     if (isSubmitting) return;
-    if (!receiverName) {
+    if (!receiverName.trim()) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้รับคืน (Staff Receiver)");
       return;
     }
-    const remarkInfo = tx.remark && tx.remark !== "-" ? `
-(หมายเหตุตอนยืม: ${tx.remark})` : "";
+    const remarkText = String(tx.remark ?? "").trim();
+    const remarkInfo = remarkText && remarkText !== "-" ? `
+(หมายเหตุตอนยืม: ${remarkText})` : "";
     showModal(
       "confirm",
       "ยืนยันการรับคืน",
@@ -36638,7 +36768,7 @@ const ReturnForm = () => {
   };
   const handleReturnSelected = () => {
     if (isSubmitting) return;
-    if (!receiverName) {
+    if (!receiverName.trim()) {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้รับคืน (Staff Receiver)");
       return;
     }
@@ -36652,6 +36782,7 @@ const ReturnForm = () => {
   };
   const processReturnBatch = async (ids) => {
     if (isSubmitting) return;
+    const trimmedReceiver = receiverName.trim();
     const txsToReturn = outstandingTransactions.filter((tx) => ids.includes(tx.id));
     if (txsToReturn.length === 0) return;
     const batchData = txsToReturn.map((tx) => ({
@@ -36662,14 +36793,14 @@ const ReturnForm = () => {
       employee_name: tx.employee_name,
       quantity: tx.quantity,
       staff_issuer: tx.staff_issuer,
-      staff_receiver: receiverName,
+      staff_receiver: trimmedReceiver,
       linked_borrow_id: tx.id,
       remark: "-"
     }));
     setIsSubmitting(true);
     try {
       await addBatchTransactions(batchData);
-      localStorage.setItem("staffReceiverName", receiverName);
+      localStorage.setItem("staffReceiverName", trimmedReceiver);
       setSelectedIds([]);
       showModal("success", "สำเร็จ", `ดำเนินการรับคืน ${txsToReturn.length} รายการเรียบร้อยแล้ว`);
     } catch (err) {
@@ -36785,17 +36916,17 @@ const ReturnForm = () => {
           /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: filteredTransactions.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("tr", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("td", { colSpan: "6", className: "empty-state", children: "ไม่พบรายการที่ตรงกับการค้นหา" }) }) : filteredTransactions.map((tx) => {
             var _a;
             const isSelected = selectedIds.includes(tx.id);
-            const hasRemark = tx.remark && tx.remark !== "-" && tx.remark.trim() !== "";
+            const txToolId = normalizeId(tx.tool_id);
+            const loc = txToolId ? ((_a = tools.find((t2) => normalizeId(t2.id) === txToolId)) == null ? void 0 : _a.location) || "-" : "-";
+            const remarkText = String(tx.remark ?? "").trim();
+            const hasRemark = remarkText !== "" && remarkText !== "-";
             return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { className: isSelected ? "row-selected" : "", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "selection-col", onClick: () => toggleSelect(tx.id), children: isSelected ? /* @__PURE__ */ jsxRuntimeExports.jsx(CheckSquare, { size: 20, className: "icon-active" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Square, { size: 20, className: "icon-muted" }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "info-cell", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "main-text font-bold", children: tx.tool_name }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "sub-text", children: [
                   "Location: ",
-                  ((_a = tools.find((t2) => {
-                    var _a2, _b;
-                    return ((_a2 = t2.id) == null ? void 0 : _a2.toString().toLowerCase()) === ((_b = tx.tool_id) == null ? void 0 : _b.toString().toLowerCase());
-                  })) == null ? void 0 : _a.location) || "-"
+                  loc
                 ] })
               ] }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "info-cell", children: [
@@ -36805,10 +36936,10 @@ const ReturnForm = () => {
                   tx.employee_id
                 ] })
               ] }) }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "date-badge", children: new Date(tx.date).toLocaleDateString("th-TH") + " " + new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "date-badge", children: formatThaiDateTime(tx.date) }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: hasRemark ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "return-remark-badge", children: [
                 "📝 ",
-                tx.remark
+                remarkText
               ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8" }, children: "-" }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "button",
@@ -36828,11 +36959,12 @@ const ReturnForm = () => {
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: filteredTransactions.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "empty-state", children: "ไม่พบรายการที่ตรงกับการค้นหา" }) : filteredTransactions.map((tx) => {
           var _a;
           const isSelected = selectedIds.includes(tx.id);
-          const loc = ((_a = tools.find((t2) => {
-            var _a2, _b;
-            return ((_a2 = t2.id) == null ? void 0 : _a2.toString().toLowerCase()) === ((_b = tx.tool_id) == null ? void 0 : _b.toString().toLowerCase());
-          })) == null ? void 0 : _a.location) || "-";
-          const timeStr = new Date(tx.date).toLocaleDateString("th-TH") + " " + new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+          const txToolId = normalizeId(tx.tool_id);
+          const loc = txToolId ? ((_a = tools.find((t2) => normalizeId(t2.id) === txToolId)) == null ? void 0 : _a.location) || "-" : "-";
+          const timeStr = formatThaiDateTime(tx.date);
+          const remarkText = String(tx.remark ?? "").trim();
+          const hasRemark = remarkText !== "" && remarkText !== "-";
+          const issuerText = String(tx.staff_issuer ?? "").trim();
           return /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "div",
             {
@@ -36887,13 +37019,13 @@ const ReturnForm = () => {
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "วันเวลาที่ยืม:" }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val time-highlight", children: timeStr })
                   ] }),
-                  tx.staff_issuer && tx.staff_issuer !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row", children: [
+                  issuerText && issuerText !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row", children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "ผู้จ่ายของ:" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: tx.staff_issuer })
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: issuerText })
                   ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `m-row ${tx.remark && tx.remark !== "-" ? "m-remark-row" : ""}`, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `m-row ${hasRemark ? "m-remark-row" : ""}`, children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "หมายเหตุ:" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: tx.remark && tx.remark !== "-" ? "m-val m-remark-highlight" : "m-val", children: tx.remark && tx.remark !== "-" ? `📝 ${tx.remark}` : "-" })
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: hasRemark ? "m-val m-remark-highlight" : "m-val", children: hasRemark ? `📝 ${remarkText}` : "-" })
                   ] })
                 ] })
               ]
@@ -36905,29 +37037,30 @@ const ReturnForm = () => {
     ] })
   ] });
 };
+const csvEscape = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
 const Summary = () => {
   const { transactions, outstandingTransactions, fetchFullHistory, hasFullHistory, isRefreshing } = useStore();
-  const [selectedDate, setSelectedDate] = reactExports.useState((/* @__PURE__ */ new Date()).toISOString().split("T")[0]);
+  const [selectedDate, setSelectedDate] = reactExports.useState(() => getTodayDateKey());
   const [viewMode, setViewMode] = reactExports.useState("daily");
   const [sortOrder, setSortOrder] = reactExports.useState("desc");
-  const isOlderThan30Days = reactExports.useMemo(() => {
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1e3;
-    return new Date(selectedDate).getTime() < cutoff;
-  }, [selectedDate]);
-  const formatDate = (dateStr) => {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString("th-TH", { day: "2-digit", month: "2-digit", year: "numeric" });
-  };
+  const isOlderThan30Days = reactExports.useMemo(
+    () => isDateKeyOlderThanDays(selectedDate),
+    [selectedDate]
+  );
+  const outstandingIdSet = reactExports.useMemo(
+    () => new Set(outstandingTransactions.map((out) => out.id)),
+    [outstandingTransactions]
+  );
   const toggleSort = () => {
     setSortOrder((prev) => prev === "desc" ? "asc" : "desc");
   };
   const stats = reactExports.useMemo(() => {
-    const dailyTx = transactions.filter((tx) => tx.date.startsWith(selectedDate));
+    const dailyTx = transactions.filter((tx) => toBangkokDateKey(tx == null ? void 0 : tx.date) === selectedDate);
     const borrowTxRaw = dailyTx.filter((tx) => tx.action === "BORROW");
     const returnTx = dailyTx.filter((tx) => tx.action === "RETURN");
     const borrowTx = [...borrowTxRaw].sort((a, b) => {
-      const isOutA = outstandingTransactions.some((out) => out.id === a.id);
-      const isOutB = outstandingTransactions.some((out) => out.id === b.id);
+      const isOutA = outstandingIdSet.has(a.id);
+      const isOutB = outstandingIdSet.has(b.id);
       if (sortOrder === "desc") {
         if (isOutA && !isOutB) return -1;
         if (!isOutA && isOutB) return 1;
@@ -36943,29 +37076,29 @@ const Summary = () => {
       borrowTx,
       returnTx
     };
-  }, [transactions, selectedDate, outstandingTransactions, sortOrder]);
+  }, [transactions, selectedDate, outstandingIdSet, sortOrder]);
   const sortedOutstanding = reactExports.useMemo(() => {
     return [...outstandingTransactions].sort((a, b) => new Date(a.date) - new Date(b.date));
   }, [outstandingTransactions]);
   const changeDate = (days) => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() + days);
-    setSelectedDate(d.toISOString().split("T")[0]);
+    setSelectedDate((prev) => shiftDateKey(prev, days));
   };
   const downloadCSV = () => {
     const dataToExport = viewMode === "daily" ? stats.borrowTx : sortedOutstanding;
     if (dataToExport.length === 0) return;
-    const headers = ["Date", "Time", "Tool", "Employee", "Staff", "Status"];
+    const headers = ["Date", "Time", "Tool ID", "Tool Name", "Employee ID", "Employee Name", "Staff", "Remark", "Status"];
     const rows = dataToExport.map((tx) => {
-      const d = new Date(tx.date);
-      const isOut = outstandingTransactions.some((out) => out.id === tx.id);
+      const isOut = outstandingIdSet.has(tx.id);
       return [
-        d.toLocaleDateString("th-TH"),
-        d.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
-        `"${tx.tool_name}"`,
-        `"${tx.employee_name}"`,
-        `"${tx.staff_issuer || tx.staff_receiver || "-"}"`,
-        isOut ? "ยังไม่คืน" : "คืนแล้ว"
+        csvEscape(formatThaiDate(tx.date)),
+        csvEscape(formatThaiTime(tx.date)),
+        csvEscape(tx.tool_id ?? ""),
+        csvEscape(tx.tool_name ?? ""),
+        csvEscape(tx.employee_id ?? ""),
+        csvEscape(tx.employee_name ?? ""),
+        csvEscape(tx.staff_issuer || tx.staff_receiver || "-"),
+        csvEscape(String(tx.remark ?? "").trim() || "-"),
+        csvEscape(isOut ? "ยังไม่คืน" : "คืนแล้ว")
       ].join(",");
     });
     const csvContent = "\uFEFF" + headers.join(",") + "\n" + rows.join("\n");
@@ -36973,7 +37106,7 @@ const Summary = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `report_${viewMode === "daily" ? selectedDate : "outstanding"}_${(/* @__PURE__ */ new Date()).toISOString().split("T")[0]}.csv`;
+    link.download = `report_${viewMode === "daily" ? selectedDate : "outstanding"}_${getTodayDateKey()}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -37008,7 +37141,7 @@ const Summary = () => {
       viewMode === "daily" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "report-actions", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "date-controls", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "icon-btn", onClick: () => changeDate(-1), children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronLeft, {}) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "date-display", children: formatDate(selectedDate) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "date-display", children: formatThaiDate(selectedDate) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "icon-btn", onClick: () => changeDate(1), children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronRight, {}) })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "date-tools-sub", children: [
@@ -37019,7 +37152,9 @@ const Summary = () => {
               {
                 type: "date",
                 value: selectedDate,
-                onChange: (e) => setSelectedDate(e.target.value)
+                onChange: (e) => {
+                  if (e.target.value) setSelectedDate(e.target.value);
+                }
               }
             )
           ] }),
@@ -37114,12 +37249,13 @@ const Summary = () => {
                 )
               ] }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: stats.borrowTx.length > 0 ? stats.borrowTx.map((tx) => {
-                const isOutstanding = outstandingTransactions.some((out) => out.id === tx.id);
+                const isOutstanding = outstandingIdSet.has(tx.id);
+                const remarkText = String(tx.remark ?? "").trim();
                 return /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: formatThaiTime(tx.date) }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "tool-cell", children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: tx.tool_name }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "remark-text", children: tx.remark && tx.remark !== "-" ? `(${tx.remark})` : "" })
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "remark-text", children: remarkText && remarkText !== "-" ? `(${remarkText})` : "" })
                   ] }) }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: tx.employee_name }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "staff-col", children: tx.staff_issuer }),
@@ -37128,8 +37264,9 @@ const Summary = () => {
               }) : /* @__PURE__ */ jsxRuntimeExports.jsx("tr", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("td", { colSpan: "5", className: "empty-row", children: "ไม่มีรายการเบิก" }) }) })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: stats.borrowTx.length > 0 ? stats.borrowTx.map((tx) => {
-              const isOutstanding = outstandingTransactions.some((out) => out.id === tx.id);
-              const timeStr = new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+              const isOutstanding = outstandingIdSet.has(tx.id);
+              const timeStr = formatThaiTime(tx.date);
+              const remarkText = String(tx.remark ?? "").trim();
               return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-summary-card", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-card-top", children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-tool-title", children: tx.tool_name }),
@@ -37159,9 +37296,9 @@ const Summary = () => {
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "ผู้จ่ายของ:" }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: tx.staff_issuer || "-" })
                   ] }),
-                  tx.remark && tx.remark !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row m-remark-row", children: [
+                  remarkText && remarkText !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row m-remark-row", children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "หมายเหตุ:" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: tx.remark })
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: remarkText })
                   ] })
                 ] })
               ] }, tx.id);
@@ -37190,7 +37327,7 @@ const Summary = () => {
                 /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "สถานะ" })
               ] }) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: stats.returnTx.length > 0 ? stats.returnTx.map((tx) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: formatThaiTime(tx.date) }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: tx.tool_name }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: tx.employee_name }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "staff-col", children: tx.staff_receiver }),
@@ -37198,7 +37335,7 @@ const Summary = () => {
               ] }, tx.id)) : /* @__PURE__ */ jsxRuntimeExports.jsx("tr", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("td", { colSpan: "5", className: "empty-row", children: "ไม่มีรายการคืน" }) }) })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: stats.returnTx.length > 0 ? stats.returnTx.map((tx) => {
-              const timeStr = new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+              const timeStr = formatThaiTime(tx.date);
               return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-summary-card", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-card-top", children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-tool-title", children: tx.tool_name }),
@@ -37257,8 +37394,8 @@ const Summary = () => {
               /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "สถานะ" })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: sortedOutstanding.length > 0 ? sortedOutstanding.map((tx) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "date-col", children: /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: formatDate(tx.date) }) }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "date-col", children: /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: formatThaiDate(tx.date) }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("td", { className: "time-col", children: formatThaiTime(tx.date) }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "tool-cell", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: tx.tool_name }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "remark-text", children: tx.id })
@@ -37274,7 +37411,8 @@ const Summary = () => {
             ] }, tx.id)) : /* @__PURE__ */ jsxRuntimeExports.jsx("tr", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("td", { colSpan: "6", className: "empty-row", children: "ยอดเยี่ยม! ไม่มีการค้างส่งอุปกรณ์" }) }) })
           ] }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: sortedOutstanding.length > 0 ? sortedOutstanding.map((tx) => {
-            const timeStr = new Date(tx.date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+            const timeStr = formatThaiTime(tx.date);
+            const remarkText = String(tx.remark ?? "").trim();
             return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-summary-card is-outstanding", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-card-top", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-tool-title", children: tx.tool_name }),
@@ -37284,7 +37422,7 @@ const Summary = () => {
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row", children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "วันที่ยืม:" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "m-val date-highlight", children: [
-                    formatDate(tx.date),
+                    formatThaiDate(tx.date),
                     " (",
                     timeStr,
                     " น.)"
@@ -37306,9 +37444,9 @@ const Summary = () => {
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "ผู้จ่ายของ:" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: tx.staff_issuer || "-" })
                 ] }),
-                tx.remark && tx.remark !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row m-remark-row", children: [
+                remarkText && remarkText !== "-" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-row m-remark-row", children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-label", children: "หมายเหตุ:" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: tx.remark })
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val", children: remarkText })
                 ] })
               ] })
             ] }, tx.id);
@@ -38434,13 +38572,18 @@ const QRManagement = () => {
   const handlePrint = () => {
     window.print();
   };
+  const sanitizeFilenamePart = (val, fallback = "unknown") => {
+    const cleaned = String(val ?? "").trim().replace(/[\\/:*?"<>|]+/g, "_");
+    return cleaned || fallback;
+  };
   const downloadQR = (toolId, toolName) => {
+    if (!toolId) return;
     const canvas = document.getElementById(`qr-${toolId}`);
     if (!canvas) return;
     const pngUrl = canvas.toDataURL("image/png").replace("image/png", "image/octet-stream");
     let downloadLink = document.createElement("a");
     downloadLink.href = pngUrl;
-    downloadLink.download = `QR_${toolId}_${toolName}.png`;
+    downloadLink.download = `QR_${sanitizeFilenamePart(toolId, "id")}_${sanitizeFilenamePart(toolName, "tool")}.png`;
     document.body.appendChild(downloadLink);
     downloadLink.click();
     document.body.removeChild(downloadLink);
@@ -38470,7 +38613,7 @@ const QRManagement = () => {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Print All QR Codes" })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "qr-grid", children: filteredTools.map((tool) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "qr-card", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "qr-grid", children: filteredTools.map((tool, idx) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "qr-card", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "qr-display", children: tool.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(
         QRCodeCanvas,
         {
@@ -38493,8 +38636,17 @@ const QRManagement = () => {
           tool.location || "-"
         ] })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "qr-actions no-print", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-icon", onClick: () => downloadQR(tool.id, tool.name), title: "Download PNG", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { size: 18 }) }) })
-    ] }, tool.id)) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "qr-actions no-print", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "btn-icon",
+          onClick: () => downloadQR(tool.id, tool.name),
+          disabled: !tool.id,
+          title: tool.id ? "Download PNG" : "Cannot download without Tool ID",
+          children: /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { size: 18 })
+        }
+      ) })
+    ] }, tool.id || `missing-${idx}`)) }),
     filteredTools.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "empty-state", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(QrCode, { size: 48 }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No tools found matching your search." })
@@ -38780,7 +38932,7 @@ const QRManagement = () => {
 const matchSearch = (item, searchStr, fields = ["name", "id", "location"]) => {
   if (!searchStr || !searchStr.trim()) return true;
   const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-  const text = fields.map((f2) => (item[f2] || "").toString().toLowerCase()).join(" ");
+  const text = fields.map((f2) => String(item[f2] ?? "").toLowerCase()).join(" ");
   return tokens.every((token) => text.includes(token));
 };
 const Unserviceable = () => {
@@ -38790,8 +38942,6 @@ const Unserviceable = () => {
   const [reason, setReason] = reactExports.useState("");
   const [markedBy, setMarkedBy] = reactExports.useState(localStorage.getItem("staffIssuerName") || "");
   const [toolSearch, setToolSearch] = reactExports.useState("");
-  const [isScanning, setIsScanning] = reactExports.useState(false);
-  const [scanner, setScanner] = reactExports.useState(null);
   const [isSubmitting, setIsSubmitting] = reactExports.useState(false);
   const [modal, setModal] = reactExports.useState({
     isOpen: false,
@@ -38807,10 +38957,10 @@ const Unserviceable = () => {
     setModal((prev) => ({ ...prev, isOpen: false }));
   };
   const unserviceableTools = tools.filter(
-    (t2) => (t2.serviceability_status || "").toUpperCase() === "UNSERVICEABLE"
+    (t2) => String(t2.serviceability_status ?? "").trim().toUpperCase() === "UNSERVICEABLE"
   );
   const serviceableTools = tools.filter(
-    (t2) => (t2.serviceability_status || "").toUpperCase() !== "UNSERVICEABLE"
+    (t2) => String(t2.serviceability_status ?? "").trim().toUpperCase() !== "UNSERVICEABLE"
   );
   const filteredServiceableTools = serviceableTools.filter(
     (t2) => matchSearch(t2, toolSearch, ["name", "id", "location"])
@@ -38830,10 +38980,11 @@ const Unserviceable = () => {
       showModal("error", "แจ้งเตือน", "กรุณาระบุชื่อผู้แจ้ง");
       return;
     }
+    const trimmedMarkedBy = markedBy.trim();
     setIsSubmitting(true);
     try {
-      await markUnserviceable(selectedTool.id, reason, markedBy);
-      localStorage.setItem("staffIssuerName", markedBy);
+      await markUnserviceable(selectedTool.id, reason.trim(), trimmedMarkedBy);
+      localStorage.setItem("staffIssuerName", trimmedMarkedBy);
       setIsFormOpen(false);
       setSelectedTool(null);
       setReason("");
@@ -38845,49 +38996,24 @@ const Unserviceable = () => {
       setIsSubmitting(false);
     }
   };
-  const startScanning = async () => {
-    setIsScanning(true);
-    setTimeout(() => {
-      const html5QrCode = new Html5Qrcode("reader-unserviceable");
-      setScanner(html5QrCode);
-      html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        (decodedText) => {
-          if (!decodedText || !decodedText.trim()) return;
-          const scannedId = decodedText.trim().toLowerCase();
-          const tool = serviceableTools.find(
-            (t2) => (t2.id || "").toString().trim().toLowerCase() === scannedId
-          );
-          if (tool) {
-            setSelectedTool(tool);
-            setToolSearch("");
-            stopScanning(html5QrCode);
-            showModal("success", "สแกนสำเร็จ", `เลือก "${tool.name || tool.id}" เรียบร้อยแล้ว`);
-          } else {
-            showModal("error", "ไม่พบข้อมูล", `ไม่พบอุปกรณ์รหัส "${decodedText}" ที่พร้อมใช้งาน`);
-          }
-        },
-        () => {
-        }
-      ).catch((err) => {
-        showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
-        setIsScanning(false);
-      });
-    }, 100);
-  };
-  const stopScanning = (scannerInstance = scanner) => {
-    if (scannerInstance && scannerInstance.isScanning) {
-      scannerInstance.stop().then(() => {
-        scannerInstance.clear();
-        setIsScanning(false);
-        setScanner(null);
-      }).catch((err) => console.error(err));
-    } else {
-      setIsScanning(false);
-      setScanner(null);
+  const { isScanning, startScanning, stopScanning } = useQrScanner({
+    elementId: "reader-unserviceable",
+    onScan: (decodedText, stop) => {
+      stop();
+      const scannedId = normalizeId(decodedText);
+      const tool = scannedId ? serviceableTools.find((t2) => normalizeId(t2.id) === scannedId) : null;
+      if (tool) {
+        setSelectedTool(tool);
+        setToolSearch("");
+        showModal("success", "สแกนสำเร็จ", `เลือก "${tool.name || tool.id}" เรียบร้อยแล้ว`);
+      } else {
+        showModal("error", "ไม่พบข้อมูล", `ไม่พบอุปกรณ์รหัส "${decodedText}" ที่พร้อมใช้งาน`);
+      }
+    },
+    onError: (err) => {
+      showModal("error", "Camera Error", "ไม่สามารถเข้าถึงกล้องได้: " + err);
     }
-  };
+  });
   const handleRestoreClick = (tool) => {
     if (isSubmitting) return;
     showModal(
@@ -38948,7 +39074,7 @@ const Unserviceable = () => {
             /* @__PURE__ */ jsxRuntimeExports.jsx("th", { children: "วันที่แจ้ง" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("th", { width: "140", children: "จัดการ" })
           ] }) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: unserviceableTools.map((tool) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: unserviceableTools.map((tool, idx) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "tool-info-cell", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "tool-name", children: tool.name || "ไม่ระบุชื่อ" }),
               /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "tool-sub", children: [
@@ -38960,7 +39086,7 @@ const Unserviceable = () => {
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "reason-badge", children: tool.unserviceable_reason || "ไม่ระบุสาเหตุ" }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "marked-by-text", children: tool.unserviceable_by || "-" }) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "date-text", children: tool.unserviceable_date ? new Date(tool.unserviceable_date).toLocaleDateString("th-TH") + " " + new Date(tool.unserviceable_date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "-" }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "date-text", children: formatThaiDateTime(tool.unserviceable_date) }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("td", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "button",
               {
@@ -38974,10 +39100,10 @@ const Unserviceable = () => {
                 ]
               }
             ) })
-          ] }, tool.id)) })
+          ] }, tool.id || `us-${idx}`)) })
         ] }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: unserviceableTools.map((tool) => {
-          const dateStr = tool.unserviceable_date ? new Date(tool.unserviceable_date).toLocaleDateString("th-TH") + " " + new Date(tool.unserviceable_date).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "-";
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mobile-cards-view", children: unserviceableTools.map((tool, idx) => {
+          const dateStr = formatThaiDateTime(tool.unserviceable_date);
           return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mobile-us-card", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-us-header", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "m-us-tool", children: [
@@ -39017,7 +39143,7 @@ const Unserviceable = () => {
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "m-val time-highlight", children: dateStr })
               ] })
             ] })
-          ] }, tool.id);
+          ] }, tool.id || `us-m-${idx}`);
         }) })
       ] })
     ] }) }),
@@ -39027,7 +39153,10 @@ const Unserviceable = () => {
           /* @__PURE__ */ jsxRuntimeExports.jsx(AlertTriangle, { size: 20, className: "text-warning" }),
           " แจ้งอุปกรณ์ชำรุด / ส่งซ่อม"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "close-btn", onClick: () => setIsFormOpen(false), children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 20 }) })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "close-btn", onClick: () => {
+          stopScanning();
+          setIsFormOpen(false);
+        }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { size: 20 }) })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("form", { onSubmit: handleMarkSubmit, className: "modal-body form-body", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "form-group relative", children: [
@@ -39095,7 +39224,7 @@ const Unserviceable = () => {
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "reader-unserviceable" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "scanner-tip", children: "วาง QR Code ให้อยู่ในกรอบเพื่อสแกน" })
             ] }) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions tool-suggestions", children: filteredServiceableTools.length > 0 ? filteredServiceableTools.map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "suggestions tool-suggestions", children: filteredServiceableTools.length > 0 ? filteredServiceableTools.map((t2, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx(
               "li",
               {
                 onClick: () => {
@@ -39117,7 +39246,7 @@ const Unserviceable = () => {
                   ] })
                 ] })
               },
-              t2.id || t2.name
+              t2.id || `srv-${idx}`
             )) : /* @__PURE__ */ jsxRuntimeExports.jsx("li", { className: "no-suggest", children: "ไม่พบอุปกรณ์ที่ตรงกับการค้นหา" }) })
           ] })
         ] }),
@@ -39152,7 +39281,10 @@ const Unserviceable = () => {
           )
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-footer", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn-secondary", onClick: () => setIsFormOpen(false), children: "ยกเลิก" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn-secondary", onClick: () => {
+            stopScanning();
+            setIsFormOpen(false);
+          }, children: "ยกเลิก" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "submit", className: "btn-primary confirm-warning", disabled: !selectedTool || isSubmitting, children: isSubmitting ? "กำลังบันทึก..." : "บันทึกแจ้งเสีย" })
         ] })
       ] })

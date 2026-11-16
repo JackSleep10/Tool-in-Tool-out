@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Search, RotateCcw, CheckSquare, Square, UserCheck, QrCode, X } from 'lucide-react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { useQrScanner } from '../hooks/useQrScanner';
+import { normalizeId } from '../utils/transactions';
+import { formatThaiDateTime } from '../utils/date';
 import Modal from './Modal';
 import './ReturnForm.css';
 const ReturnForm = () => {
@@ -11,8 +13,6 @@ const ReturnForm = () => {
     const [receiverName, setReceiverName] = useState(localStorage.getItem('staffReceiverName') || '');
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedIds, setSelectedIds] = useState([]);
-    const [isScanning, setIsScanning] = useState(false);
-    const [scanner, setScanner] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Modal State
@@ -37,7 +37,7 @@ const ReturnForm = () => {
         const tokens = searchTerm.trim().toLowerCase().split(/\s+/);
         const text = [
             tx.tool_name, tx.tool_id, tx.employee_name, tx.employee_id, tx.staff_issuer, tx.remark
-        ].map(val => (val || '').toString().toLowerCase()).join(' ');
+        ].map(val => String(val ?? '').toLowerCase()).join(' ');
         return tokens.every(token => text.includes(token));
     });
 
@@ -57,12 +57,12 @@ const ReturnForm = () => {
     };
 
     const processSearch = (value) => {
-        const cleanId = value.trim().toLowerCase();
+        const cleanId = normalizeId(value);
         if (!cleanId) return;
 
         // Try to identify if this is a tool ID match
         const relevantTxs = outstandingTransactions.filter(tx =>
-            (tx.tool_id || '').toString().trim().toLowerCase() === cleanId
+            normalizeId(tx.tool_id) === cleanId
         );
 
         if (relevantTxs.length > 0) {
@@ -79,68 +79,36 @@ const ReturnForm = () => {
         }
     };
 
-    const startScanning = async () => {
-        setIsScanning(true);
-        setTimeout(() => {
-            const html5QrCode = new Html5Qrcode("reader-return");
-            setScanner(html5QrCode);
-            html5QrCode.start(
-                { facingMode: "environment" },
-                {
-                    fps: 10,
-                    qrbox: { width: 250, height: 250 }
-                },
-                (decodedText) => {
-                    // Success callback: Find all transactions for this tool ID
-                    if (!decodedText || !decodedText.trim()) return;
+    const { isScanning, startScanning, stopScanning } = useQrScanner({
+        elementId: 'reader-return',
+        onScan: (decodedText, stop) => {
+            stop();
+            const scannedId = normalizeId(decodedText);
+            const relevantTxs = scannedId
+                ? outstandingTransactions.filter(tx => normalizeId(tx.tool_id) === scannedId)
+                : [];
 
-                    const scannedId = decodedText.trim().toLowerCase();
-                    const relevantTxs = outstandingTransactions.filter(tx =>
-                        tx.tool_id.toString().trim().toLowerCase() === scannedId
-                    );
-
-                    if (relevantTxs.length > 0) {
-                        const newIds = relevantTxs.map(tx => tx.id);
-                        setSelectedIds(prev => {
-                            const combined = [...new Set([...prev, ...newIds])];
-                            return combined;
-                        });
-                        stopScanning(html5QrCode);
-                    } else {
-                        showModal('error', 'ไม่พบข้อมูล', `ไม่พบรายการค้างส่งสำหรับอุปกรณ์รหัส "${decodedText}"`);
-                    }
-                },
-                (errorMessage) => {
-                    // console.log(errorMessage);
-                }
-            ).catch(err => {
-                showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
-                setIsScanning(false);
-            });
-        }, 100);
-    };
-
-    const stopScanning = (scannerInstance = scanner) => {
-        if (scannerInstance && scannerInstance.isScanning) {
-            scannerInstance.stop().then(() => {
-                scannerInstance.clear();
-                setIsScanning(false);
-                setScanner(null);
-            }).catch(err => console.error(err));
-        } else {
-            setIsScanning(false);
-            setScanner(null);
+            if (relevantTxs.length > 0) {
+                const newIds = relevantTxs.map(tx => tx.id);
+                setSelectedIds(prev => [...new Set([...prev, ...newIds])]);
+            } else {
+                showModal('error', 'ไม่พบข้อมูล', `ไม่พบรายการค้างส่งสำหรับอุปกรณ์รหัส "${decodedText}"`);
+            }
+        },
+        onError: (err) => {
+            showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
         }
-    };
+    });
 
     const handleReturnClick = (tx) => {
         if (isSubmitting) return;
-        if (!receiverName) {
+        if (!receiverName.trim()) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้รับคืน (Staff Receiver)');
             return;
         }
 
-        const remarkInfo = tx.remark && tx.remark !== '-' ? `\n(หมายเหตุตอนยืม: ${tx.remark})` : '';
+        const remarkText = String(tx.remark ?? '').trim();
+        const remarkInfo = remarkText && remarkText !== '-' ? `\n(หมายเหตุตอนยืม: ${remarkText})` : '';
         showModal(
             'confirm',
             'ยืนยันการรับคืน',
@@ -151,7 +119,7 @@ const ReturnForm = () => {
 
     const handleReturnSelected = () => {
         if (isSubmitting) return;
-        if (!receiverName) {
+        if (!receiverName.trim()) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้รับคืน (Staff Receiver)');
             return;
         }
@@ -167,6 +135,7 @@ const ReturnForm = () => {
 
     const processReturnBatch = async (ids) => {
         if (isSubmitting) return;
+        const trimmedReceiver = receiverName.trim();
         const txsToReturn = outstandingTransactions.filter(tx => ids.includes(tx.id));
         if (txsToReturn.length === 0) return;
 
@@ -178,7 +147,7 @@ const ReturnForm = () => {
             employee_name: tx.employee_name,
             quantity: tx.quantity,
             staff_issuer: tx.staff_issuer,
-            staff_receiver: receiverName,
+            staff_receiver: trimmedReceiver,
             linked_borrow_id: tx.id,
             remark: '-'
         }));
@@ -186,7 +155,7 @@ const ReturnForm = () => {
         setIsSubmitting(true);
         try {
             await addBatchTransactions(batchData);
-            localStorage.setItem('staffReceiverName', receiverName);
+            localStorage.setItem('staffReceiverName', trimmedReceiver);
             setSelectedIds([]);
             showModal('success', 'สำเร็จ', `ดำเนินการรับคืน ${txsToReturn.length} รายการเรียบร้อยแล้ว`);
         } catch (err) {
@@ -306,7 +275,10 @@ const ReturnForm = () => {
                                 ) : (
                                     filteredTransactions.map(tx => {
                                         const isSelected = selectedIds.includes(tx.id);
-                                        const hasRemark = tx.remark && tx.remark !== '-' && tx.remark.trim() !== '';
+                                        const txToolId = normalizeId(tx.tool_id);
+                                        const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                                        const remarkText = String(tx.remark ?? '').trim();
+                                        const hasRemark = remarkText !== '' && remarkText !== '-';
                                         return (
                                             <tr key={tx.id} className={isSelected ? 'row-selected' : ''}>
                                                 <td className="selection-col" onClick={() => toggleSelect(tx.id)}>
@@ -318,7 +290,7 @@ const ReturnForm = () => {
                                                 <td>
                                                     <div className="info-cell">
                                                         <span className="main-text font-bold">{tx.tool_name}</span>
-                                                        <span className="sub-text">Location: {tools.find(t => t.id?.toString().toLowerCase() === tx.tool_id?.toString().toLowerCase())?.location || '-'}</span>
+                                                        <span className="sub-text">Location: {loc}</span>
                                                     </div>
                                                 </td>
                                                 <td>
@@ -329,13 +301,13 @@ const ReturnForm = () => {
                                                 </td>
                                                 <td>
                                                     <div className="date-badge">
-                                                        {new Date(tx.date).toLocaleDateString('th-TH') + ' ' + new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}
+                                                        {formatThaiDateTime(tx.date)}
                                                     </div>
                                                 </td>
                                                 <td>
                                                     {hasRemark ? (
                                                         <span className="return-remark-badge">
-                                                            📝 {tx.remark}
+                                                            📝 {remarkText}
                                                         </span>
                                                     ) : (
                                                         <span style={{ color: '#94a3b8' }}>-</span>
@@ -366,8 +338,12 @@ const ReturnForm = () => {
                         ) : (
                             filteredTransactions.map(tx => {
                                 const isSelected = selectedIds.includes(tx.id);
-                                const loc = tools.find(t => t.id?.toString().toLowerCase() === tx.tool_id?.toString().toLowerCase())?.location || '-';
-                                const timeStr = new Date(tx.date).toLocaleDateString('th-TH') + ' ' + new Date(tx.date).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+                                const txToolId = normalizeId(tx.tool_id);
+                                const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                                const timeStr = formatThaiDateTime(tx.date);
+                                const remarkText = String(tx.remark ?? '').trim();
+                                const hasRemark = remarkText !== '' && remarkText !== '-';
+                                const issuerText = String(tx.staff_issuer ?? '').trim();
 
                                 return (
                                     <div
@@ -410,16 +386,16 @@ const ReturnForm = () => {
                                                 <span className="m-label">วันเวลาที่ยืม:</span>
                                                 <span className="m-val time-highlight">{timeStr}</span>
                                             </div>
-                                            {tx.staff_issuer && tx.staff_issuer !== '-' && (
+                                            {issuerText && issuerText !== '-' && (
                                                 <div className="m-row">
                                                     <span className="m-label">ผู้จ่ายของ:</span>
-                                                    <span className="m-val">{tx.staff_issuer}</span>
+                                                    <span className="m-val">{issuerText}</span>
                                                 </div>
                                             )}
-                                            <div className={`m-row ${tx.remark && tx.remark !== '-' ? 'm-remark-row' : ''}`}>
+                                            <div className={`m-row ${hasRemark ? 'm-remark-row' : ''}`}>
                                                 <span className="m-label">หมายเหตุ:</span>
-                                                <span className={tx.remark && tx.remark !== '-' ? 'm-val m-remark-highlight' : 'm-val'}>
-                                                    {tx.remark && tx.remark !== '-' ? `📝 ${tx.remark}` : '-'}
+                                                <span className={hasRemark ? 'm-val m-remark-highlight' : 'm-val'}>
+                                                    {hasRemark ? `📝 ${remarkText}` : '-'}
                                                 </span>
                                             </div>
                                         </div>

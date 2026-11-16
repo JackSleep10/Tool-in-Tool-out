@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Search, ShoppingBasket, User, MapPin, X, AlertTriangle, QrCode, ShieldAlert } from 'lucide-react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { useQrScanner } from '../hooks/useQrScanner';
+import { normalizeId } from '../utils/transactions';
 import Modal from './Modal';
 import './BorrowForm.css';
 const BorrowForm = () => {
@@ -16,8 +17,6 @@ const BorrowForm = () => {
     const [remark, setRemark] = useState('');
     const [empSearch, setEmpSearch] = useState('');
     const [toolSearch, setToolSearch] = useState('');
-    const [isScanning, setIsScanning] = useState(false);
-    const [scanner, setScanner] = useState(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Modal State
@@ -41,7 +40,7 @@ const BorrowForm = () => {
     const matchSearch = (item, searchStr, fields) => {
         if (!searchStr || !searchStr.trim()) return true;
         const tokens = searchStr.trim().toLowerCase().split(/\s+/);
-        const text = fields.map(f => (item[f] || '').toString().toLowerCase()).join(' ');
+        const text = fields.map(f => String(item[f] ?? '').toLowerCase()).join(' ');
         return tokens.every(token => text.includes(token));
     };
 
@@ -58,21 +57,24 @@ const BorrowForm = () => {
     // Helper: check if tool is unserviceable
     const isToolUnserviceable = (tool) => {
         if (!tool) return false;
-        const status = (tool.serviceability_status || tool.status || '').toString().trim().toUpperCase();
+        const status = String(tool.serviceability_status || tool.status || '').trim().toUpperCase();
         return status === 'UNSERVICEABLE' || status === 'U/S' || status.includes('UNSERVICE') || status.includes('ชำรุด');
     };
 
     const addToBasket = (tool) => {
+        if (!tool) return false;
+
         // 0. Block Unserviceable tools
         if (isToolUnserviceable(tool)) {
             showModal('error', '⛔ อุปกรณ์ชำรุด (U/S)', `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้\nสาเหตุ: ${tool.unserviceable_reason || 'ไม่ระบุ'}`);
-            return;
+            return false;
         }
 
         // 1. Check if already in basket
-        if (basket.some(t => t.id === tool.id)) {
+        const targetId = normalizeId(tool.id);
+        if (basket.some(t => (targetId ? normalizeId(t.id) === targetId : t.id === tool.id))) {
             showModal('error', 'ข้อผิดพลาด', 'อุปกรณ์นี้มีอยู่ในตะกร้าแล้ว');
-            return;
+            return false;
         }
 
         // 2. Global Availability Check (Quick Return Logic)
@@ -81,24 +83,29 @@ const BorrowForm = () => {
             showModal(
                 'confirm',
                 'อุปกรณ์ยังไม่ได้คืน',
-                `"${tool.name}" อยู่กับ ${borrower.employee_name} (${borrower.employee_id}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
+                `"${tool.name}" อยู่กับ ${borrower?.employee_name || '-'} (${borrower?.employee_id || '-'}) ต้องการ "รับคืนทันที" เพื่อยืมต่อเลยหรือไม่?`,
                 async () => {
                     if (isSubmitting) return;
+                    const trimmedIssuer = issuerName.trim();
+                    const receiver = trimmedIssuer || 'Auto-Return';
                     setIsSubmitting(true);
                     try {
                         await addBatchTransactions([{
                             action: 'RETURN',
                             tool_id: tool.id,
                             tool_name: tool.name,
-                            employee_id: borrower.employee_id,
-                            employee_name: borrower.employee_name,
+                            employee_id: borrower?.employee_id || '',
+                            employee_name: borrower?.employee_name || '',
                             quantity: 1,
-                            staff_issuer: borrower.staff_issuer,
-                            staff_receiver: 'Auto-Return',
-                            linked_borrow_id: borrower.id,
+                            staff_issuer: borrower?.staff_issuer || '-',
+                            staff_receiver: receiver,
+                            linked_borrow_id: borrower?.id || '',
                             remark: 'คืนอัตโนมัติเพื่อยืมต่อ'
                         }]);
 
+                        if (trimmedIssuer) {
+                            localStorage.setItem('staffIssuerName', trimmedIssuer);
+                        }
                         setBasket(prev => [...prev, tool]);
                         setToolSearch('');
                         showModal('success', 'รับคืนสำเร็จ', `รับคืน "${tool.name}" และเพิ่มลงในตะกร้าแล้ว`);
@@ -109,21 +116,20 @@ const BorrowForm = () => {
                     }
                 }
             );
-            return;
+            return false;
         }
 
-        setBasket([...basket, tool]);
+        setBasket(prev => [...prev, tool]);
         setToolSearch('');
+        return true;
     };
 
     const processToolSearch = (searchValue) => {
-        const cleanSearch = searchValue.trim().toLowerCase();
+        const cleanSearch = normalizeId(searchValue);
         if (!cleanSearch) return;
 
         // Try to find exact ID match
-        const exactMatch = tools.find(t =>
-            (t.id || '').toString().toLowerCase() === cleanSearch
-        );
+        const exactMatch = tools.find(t => normalizeId(t.id) === cleanSearch);
 
         if (exactMatch) {
             addToBasket(exactMatch);
@@ -137,68 +143,34 @@ const BorrowForm = () => {
         }
     };
 
-    const startScanning = async () => {
-        setIsScanning(true);
-        setTimeout(() => {
-            const html5QrCode = new Html5Qrcode("reader");
-            setScanner(html5QrCode);
-            html5QrCode.start(
-                { facingMode: "environment" },
-                {
-                    fps: 10,
-                    qrbox: { width: 250, height: 250 }
-                },
-                (decodedText) => {
-                    // Success callback
-                    if (!decodedText || !decodedText.trim()) return;
+    const { isScanning, startScanning, stopScanning } = useQrScanner({
+        elementId: 'reader',
+        onScan: (decodedText, stop) => {
+            stop();
+            const scannedId = normalizeId(decodedText);
+            const tool = scannedId ? tools.find(t => normalizeId(t.id) === scannedId) : null;
 
-                    const scannedId = decodedText.trim().toLowerCase();
-                    const tool = tools.find(t =>
-                        t.id.toString().trim().toLowerCase() === scannedId
-                    );
-
-                    if (tool) {
-                        if (isToolUnserviceable(tool)) {
-                            stopScanning(html5QrCode);
-                            showModal('error', '⛔ อุปกรณ์ชำรุด (U/S)', `"${tool.name}" อยู่ในสถานะ Unserviceable ไม่สามารถเบิกได้\nสาเหตุ: ${tool.unserviceable_reason || 'ไม่ระบุ'}`);
-                        } else {
-                            addToBasket(tool);
-                            stopScanning(html5QrCode);
-                            showModal('success', 'สแกนสำเร็จ', `เพิ่ม "${tool.name}" ลงในตะกร้าแล้ว`);
-                        }
-                    } else {
-                        showModal('error', 'ไม่พบข้อมูล', `ไม่พบอุปกรณ์รหัส "${decodedText}" ในระบบ`);
-                    }
-                },
-                (errorMessage) => {
-                    // console.log(errorMessage);
+            if (tool) {
+                const added = addToBasket(tool);
+                if (added) {
+                    showModal('success', 'สแกนสำเร็จ', `เพิ่ม "${tool.name}" ลงในตะกร้าแล้ว`);
                 }
-            ).catch(err => {
-                showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
-                setIsScanning(false);
-            });
-        }, 100);
-    };
-
-    const stopScanning = (scannerInstance = scanner) => {
-        if (scannerInstance && scannerInstance.isScanning) {
-            scannerInstance.stop().then(() => {
-                scannerInstance.clear();
-                setIsScanning(false);
-                setScanner(null);
-            }).catch(err => console.error(err));
-        } else {
-            setIsScanning(false);
-            setScanner(null);
+            } else {
+                showModal('error', 'ไม่พบข้อมูล', `ไม่พบอุปกรณ์รหัส "${decodedText}" ในระบบ`);
+            }
+        },
+        onError: (err) => {
+            showModal('error', 'Camera Error', 'ไม่สามารถเข้าถึงกล้องได้: ' + err);
         }
-    };
+    });
 
     const removeFromBasket = (toolId) => {
-        setBasket(basket.filter(t => t.id !== toolId));
+        setBasket(prev => prev.filter(t => t.id !== toolId));
     };
 
     const handleSubmit = () => {
         if (isSubmitting) return;
+        const trimmedIssuer = issuerName.trim();
         if (!selectedEmployee) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อพนักงานผู้ยืม');
             return;
@@ -207,7 +179,7 @@ const BorrowForm = () => {
             showModal('error', 'แจ้งเตือน', 'กรุณาเลือกอุปกรณ์อย่างน้อย 1 ชิ้น');
             return;
         }
-        if (!issuerName) {
+        if (!trimmedIssuer) {
             showModal('error', 'แจ้งเตือน', 'กรุณาระบุชื่อผู้จ่ายของ (Staff Issuer)');
             return;
         }
@@ -223,7 +195,7 @@ const BorrowForm = () => {
         const unavailable = basket.find(tool => isToolCurrentlyOut(tool.id));
         if (unavailable) {
             const borrower = getToolBorrower(unavailable.id);
-            showModal('error', 'พบปัญหาในการบันทึก', `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${borrower.employee_name} โปรดนำออกจากตะกร้าก่อนบันทึก`);
+            showModal('error', 'พบปัญหาในการบันทึก', `อุปกรณ์ "${unavailable.name}" เพิ่งถูกยืมไปโดย ${borrower?.employee_name || '-'} โปรดนำออกจากตะกร้าก่อนบันทึก`);
             return;
         }
 
@@ -237,7 +209,7 @@ const BorrowForm = () => {
                 employee_id: selectedEmployee.id,
                 employee_name: selectedEmployee.name,
                 quantity: 1,
-                staff_issuer: issuerName,
+                staff_issuer: trimmedIssuer,
                 staff_receiver: '-',
                 remark: remark
             }));
@@ -249,7 +221,7 @@ const BorrowForm = () => {
                 setSelectedEmployee(null);
                 setEmpSearch('');
                 setRemark('');
-                localStorage.setItem('staffIssuerName', issuerName);
+                localStorage.setItem('staffIssuerName', trimmedIssuer);
                 showModal('success', 'สำเร็จ', 'บันทึกรายการยืมเรียบร้อยแล้ว');
             } catch (err) {
                 showModal('error', 'บันทึกไม่สำเร็จ', err.message || 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
@@ -303,8 +275,8 @@ const BorrowForm = () => {
                         </div>
                         {empSearch && !selectedEmployee && filteredEmployees.length > 0 && (
                             <ul className="suggestions">
-                                {filteredEmployees.map(emp => (
-                                    <li key={emp.name} onClick={() => {
+                                {filteredEmployees.map((emp, idx) => (
+                                    <li key={emp.id || `${emp.name}-${idx}`} onClick={() => {
                                         setSelectedEmployee(emp);
                                         setEmpSearch(emp.name);
                                     }}>
@@ -327,6 +299,7 @@ const BorrowForm = () => {
                                 onKeyDown={handleToolKeyDown}
                             />
                             <button
+                                type="button"
                                 className="scan-btn-inline"
                                 onClick={startScanning}
                                 title="สแกน QR Code"
@@ -339,7 +312,7 @@ const BorrowForm = () => {
                                 <div className="scanner-container">
                                     <div className="scanner-header">
                                         <h4>Scan Tool QR Code</h4>
-                                        <button onClick={() => stopScanning()} className="close-scanner">
+                                        <button type="button" onClick={() => stopScanning()} className="close-scanner">
                                             <X size={20} />
                                         </button>
                                     </div>
@@ -350,12 +323,12 @@ const BorrowForm = () => {
                         )}
                         {toolSearch && filteredTools.length > 0 && (
                             <ul className="suggestions">
-                                {filteredTools.map(tool => {
+                                {filteredTools.map((tool, idx) => {
                                     const isOut = isToolCurrentlyOut(tool.id);
                                     const isUS = isToolUnserviceable(tool);
                                     return (
                                         <li
-                                            key={tool.id}
+                                            key={tool.id || `${tool.name}-${idx}`}
                                             onClick={() => addToBasket(tool)}
                                             className={isUS ? 'disabled unserviceable' : isOut ? 'disabled' : ''}
                                         >
@@ -398,7 +371,7 @@ const BorrowForm = () => {
                             <div className="empty-state">ยังไม่มีรายการ</div>
                         ) : (
                             basket.map((item, idx) => (
-                                <div key={idx} className="basket-item">
+                                <div key={item.id || idx} className="basket-item">
                                     <div className="item-info">
                                         <h4>{item.name}</h4>
                                         <small>{item.location}</small>
