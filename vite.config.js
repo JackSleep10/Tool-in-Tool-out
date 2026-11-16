@@ -9,6 +9,6 @@ export default defineConfig({
         outDir: 'dist',
         assetsInlineLimit: 100000000, // Inline everything
         chunkSizeWarningLimit: 100000000,
-        minify: false, // Make output readable
+        minify: true,
     }
 })

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { Search, RotateCcw, CheckSquare, Square, UserCheck, QrCode, X } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
@@ -7,13 +7,15 @@ import { formatThaiDateTime } from '../utils/date';
 import Modal from './Modal';
 import './ReturnForm.css';
 const ReturnForm = () => {
-    const { outstandingTransactions, addBatchTransactions, tools } = useStore();
+    const { outstandingTransactions, addBatchTransactions, toolsByIdMap } = useStore();
 
     // State
     const [receiverName, setReceiverName] = useState(localStorage.getItem('staffReceiverName') || '');
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedIds, setSelectedIds] = useState([]);
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
     // Modal State
     const [modal, setModal] = useState({
@@ -32,14 +34,14 @@ const ReturnForm = () => {
         setModal(prev => ({ ...prev, isOpen: false }));
     };
 
-    const filteredTransactions = outstandingTransactions.filter(tx => {
+    const filteredTransactions = useMemo(() => outstandingTransactions.filter(tx => {
         if (!searchTerm || !searchTerm.trim()) return true;
         const tokens = searchTerm.trim().toLowerCase().split(/\s+/);
         const text = [
             tx.tool_name, tx.tool_id, tx.employee_name, tx.employee_id, tx.staff_issuer, tx.remark
         ].map(val => String(val ?? '').toLowerCase()).join(' ');
         return tokens.every(token => text.includes(token));
-    });
+    }), [outstandingTransactions, searchTerm]);
 
     // Selection Logic
     const toggleSelect = (id) => {
@@ -136,7 +138,8 @@ const ReturnForm = () => {
     const processReturnBatch = async (ids) => {
         if (isSubmitting) return;
         const trimmedReceiver = receiverName.trim();
-        const txsToReturn = outstandingTransactions.filter(tx => ids.includes(tx.id));
+        const idSet = new Set(ids);
+        const txsToReturn = outstandingTransactions.filter(tx => idSet.has(tx.id));
         if (txsToReturn.length === 0) return;
 
         const batchData = txsToReturn.map(tx => ({
@@ -206,6 +209,7 @@ const ReturnForm = () => {
                                 onKeyDown={handleSearchKeyDown}
                             />
                             <button
+                                type="button"
                                 className="scan-btn-inline"
                                 onClick={startScanning}
                                 title="สแกน QR Code"
@@ -221,7 +225,7 @@ const ReturnForm = () => {
                         <div className="scanner-container">
                             <div className="scanner-header">
                                 <h4>Scan Tool QR Code to Return</h4>
-                                <button onClick={() => stopScanning()} className="close-scanner">
+                                <button type="button" onClick={() => stopScanning()} className="close-scanner">
                                     <X size={20} />
                                 </button>
                             </div>
@@ -274,9 +278,9 @@ const ReturnForm = () => {
                                     </tr>
                                 ) : (
                                     filteredTransactions.map(tx => {
-                                        const isSelected = selectedIds.includes(tx.id);
+                                        const isSelected = selectedIdSet.has(tx.id);
                                         const txToolId = normalizeId(tx.tool_id);
-                                        const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                                        const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
                                         const remarkText = String(tx.remark ?? '').trim();
                                         const hasRemark = remarkText !== '' && remarkText !== '-';
                                         return (
@@ -337,9 +341,9 @@ const ReturnForm = () => {
                             <div className="empty-state">ไม่พบรายการที่ตรงกับการค้นหา</div>
                         ) : (
                             filteredTransactions.map(tx => {
-                                const isSelected = selectedIds.includes(tx.id);
+                                const isSelected = selectedIdSet.has(tx.id);
                                 const txToolId = normalizeId(tx.tool_id);
-                                const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                                const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
                                 const timeStr = formatThaiDateTime(tx.date);
                                 const remarkText = String(tx.remark ?? '').trim();
                                 const hasRemark = remarkText !== '' && remarkText !== '-';

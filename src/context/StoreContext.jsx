@@ -50,6 +50,7 @@ export const StoreProvider = ({ children }) => {
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [hasFullHistory, setHasFullHistory] = useState(false);
     const hasFullHistoryRef = useRef(false);
+    const pendingMutationsRef = useRef(0);
     const [lastSyncTime, setLastSyncTime] = useState(() => {
         try {
             return localStorage.getItem('gse_cache_timestamp') || null;
@@ -57,21 +58,27 @@ export const StoreProvider = ({ children }) => {
             return null;
         }
     });
+    const lastSyncTimeRef = useRef(lastSyncTime);
 
-    // Initial Data Load (Background update)
-    useEffect(() => {
-        loadData(true);
-    }, []);
-
-    // Auto-refresh data every 30 seconds silently in the background
-    useEffect(() => {
-        const interval = setInterval(() => {
-            loadData(true);
-        }, 30000);
-        return () => clearInterval(interval);
-    }, []);
+    const cacheRecentTransactions = (txList, outstandingList) => {
+        try {
+            const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+            const outIds = new Set((outstandingList || []).map(item => item.id).filter(Boolean));
+            const recent = (txList || []).filter(tx => {
+                if (tx?.id && outIds.has(tx.id)) return true;
+                const ts = tx?.date ? new Date(tx.date).getTime() : NaN;
+                return !Number.isNaN(ts) && ts >= cutoff;
+            });
+            localStorage.setItem('gse_cache_transactions', JSON.stringify(recent));
+        } catch (cacheErr) {
+            console.warn('LocalStorage transaction cache error:', cacheErr);
+        }
+    };
 
     const loadData = async (silent = false) => {
+        // M2: avoid overwriting optimistic state while a write mutation is in flight
+        if (silent && pendingMutationsRef.current > 0) return;
+
         if (!silent) {
             setLoading(true);
         }
@@ -79,6 +86,8 @@ export const StoreProvider = ({ children }) => {
         try {
             const includeFull = hasFullHistoryRef.current;
             const result = await fetchFromSheet('GET_ALL_DATA', includeFull ? { full_history: true } : {});
+            if (silent && pendingMutationsRef.current > 0) return;
+
             if (result && result.status === 'success') {
                 const data = result.data;
                 const newEmps = data.employees || [];
@@ -92,16 +101,26 @@ export const StoreProvider = ({ children }) => {
                 hasFullHistoryRef.current = fullFlag;
                 setHasFullHistory(fullFlag);
                 const now = Date.now().toString();
+                lastSyncTimeRef.current = now;
                 setLastSyncTime(now);
 
-                // Update LocalStorage cache
+                // Update LocalStorage cache (M10: keep transactions cached to 30-day + outstanding slice)
                 try {
                     localStorage.setItem('gse_cache_employees', JSON.stringify(newEmps));
                     localStorage.setItem('gse_cache_tools', JSON.stringify(newTools));
-                    localStorage.setItem('gse_cache_transactions', JSON.stringify(newTxs));
                     localStorage.setItem('gse_cache_timestamp', now);
                 } catch (cacheErr) {
                     console.warn('LocalStorage save error (quota exceeded):', cacheErr);
+                }
+                if (fullFlag) {
+                    const { outstandingList } = computeOutstanding(newTxs);
+                    cacheRecentTransactions(newTxs, outstandingList);
+                } else {
+                    try {
+                        localStorage.setItem('gse_cache_transactions', JSON.stringify(newTxs));
+                    } catch (cacheErr) {
+                        console.warn('LocalStorage transaction cache error:', cacheErr);
+                    }
                 }
             } else {
                 console.error('Failed to load data:', result);
@@ -114,6 +133,37 @@ export const StoreProvider = ({ children }) => {
         }
     };
 
+    // Initial Data Load (Background update)
+    useEffect(() => {
+        loadData(true);
+    }, []);
+
+    // Auto-refresh every 30s only when tab is visible, and sync immediately when returning to tab
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (typeof document !== 'undefined' && document.hidden) return;
+            loadData(true);
+        }, 30000);
+
+        const handleVisibilityChange = () => {
+            if (typeof document === 'undefined' || document.hidden) return;
+            const last = Number(lastSyncTimeRef.current || 0);
+            if (Date.now() - last >= 15000) {
+                loadData(true);
+            }
+        };
+
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+        }
+        return () => {
+            clearInterval(interval);
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', handleVisibilityChange);
+            }
+        };
+    }, []);
+
     const fetchFullHistory = async () => {
         if (hasFullHistoryRef.current) return;
         setIsRefreshing(true);
@@ -124,11 +174,9 @@ export const StoreProvider = ({ children }) => {
                 setTransactions(fullTxs);
                 hasFullHistoryRef.current = true;
                 setHasFullHistory(true);
-                try {
-                    localStorage.setItem('gse_cache_transactions', JSON.stringify(fullTxs));
-                } catch (e) {
-                    console.warn('Could not cache full history:', e);
-                }
+                // M10: keep localStorage bounded to 30-day + outstanding slice
+                const { outstandingList } = computeOutstanding(fullTxs);
+                cacheRecentTransactions(fullTxs, outstandingList);
             }
         } catch (error) {
             console.error('Error fetching full history:', error);
@@ -142,17 +190,39 @@ export const StoreProvider = ({ children }) => {
         return [...outstandingList].reverse();
     }, [transactions]);
 
+    // M7: O(1) lookup maps for tools and currently-out tools
+    const toolsByIdMap = useMemo(() => {
+        const map = new Map();
+        for (const tool of tools) {
+            const key = normalizeId(tool?.id);
+            if (key && !map.has(key)) {
+                map.set(key, tool);
+            }
+        }
+        return map;
+    }, [tools]);
+
+    const outstandingByToolIdMap = useMemo(() => {
+        const map = new Map();
+        for (const tx of realOutstanding) {
+            const key = normalizeId(tx?.tool_id);
+            if (key && !map.has(key)) {
+                map.set(key, tx);
+            }
+        }
+        return map;
+    }, [realOutstanding]);
+
     // Helper: Is this specific physical tool currently borrowed by ANYONE?
     const isToolCurrentlyOut = (toolId) => {
         const target = normalizeId(toolId);
-        return target !== '' && realOutstanding.some(tx => normalizeId(tx.tool_id) === target);
+        return target !== '' && outstandingByToolIdMap.has(target);
     };
 
     // Helper: Who has this tool? (optional metadata)
     const getToolBorrower = (toolId) => {
         const target = normalizeId(toolId);
-        if (!target) return undefined;
-        return realOutstanding.find(tx => normalizeId(tx.tool_id) === target);
+        return target ? outstandingByToolIdMap.get(target) : undefined;
     };
 
     // Actions
@@ -165,16 +235,28 @@ export const StoreProvider = ({ children }) => {
             status: 'PENDING_SERVER'
         };
 
+        pendingMutationsRef.current += 1;
+        let released = false;
+        const releaseMutation = () => {
+            if (!released) {
+                released = true;
+                pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+            }
+        };
+
         setTransactions(prev => [...prev, optimisticTx]);
 
         try {
             const result = await fetchFromSheet(transactionData.action, transactionData);
+            releaseMutation();
             await loadData(true);
             return result.data;
         } catch (e) {
             setTransactions(prev => prev.filter(tx => tx.id !== tempId));
             console.error('Network Error', e);
             throw e;
+        } finally {
+            releaseMutation();
         }
     };
 
@@ -195,24 +277,45 @@ export const StoreProvider = ({ children }) => {
             };
         });
 
+        pendingMutationsRef.current += 1;
+        let released = false;
+        const releaseMutation = () => {
+            if (!released) {
+                released = true;
+                pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+            }
+        };
+
         setTransactions(prev => [...prev, ...optimisticTxs]);
 
         try {
             const result = await fetchFromSheet('BATCH_TRANSACTIONS', {
                 transactions: transactionsArray
             });
+            releaseMutation();
             await loadData(true);
             return result.data;
         } catch (e) {
             setTransactions(prev => prev.filter(tx => !tempIds.has(tx.id)));
             console.error('Batch Network Error', e);
             throw e;
+        } finally {
+            releaseMutation();
         }
     };
 
     const markUnserviceable = async (toolId, reason, markedBy) => {
         let previousTool = null;
         const targetId = normalizeId(toolId);
+
+        pendingMutationsRef.current += 1;
+        let released = false;
+        const releaseMutation = () => {
+            if (!released) {
+                released = true;
+                pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+            }
+        };
 
         setTools(prev => prev.map(t => {
             if (targetId && normalizeId(t.id) === targetId) {
@@ -234,6 +337,7 @@ export const StoreProvider = ({ children }) => {
                 reason: reason,
                 marked_by: markedBy
             });
+            releaseMutation();
             await loadData(true);
             return result.data;
         } catch (e) {
@@ -242,12 +346,23 @@ export const StoreProvider = ({ children }) => {
             }
             console.error('Error marking unserviceable:', e);
             throw e;
+        } finally {
+            releaseMutation();
         }
     };
 
     const markServiceable = async (toolId) => {
         let previousTool = null;
         const targetId = normalizeId(toolId);
+
+        pendingMutationsRef.current += 1;
+        let released = false;
+        const releaseMutation = () => {
+            if (!released) {
+                released = true;
+                pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+            }
+        };
 
         setTools(prev => prev.map(t => {
             if (targetId && normalizeId(t.id) === targetId) {
@@ -267,6 +382,7 @@ export const StoreProvider = ({ children }) => {
             const result = await fetchFromSheet('MARK_SERVICEABLE', {
                 tool_id: toolId
             });
+            releaseMutation();
             await loadData(true);
             return result.data;
         } catch (e) {
@@ -275,6 +391,8 @@ export const StoreProvider = ({ children }) => {
             }
             console.error('Error marking serviceable:', e);
             throw e;
+        } finally {
+            releaseMutation();
         }
     };
 
@@ -303,6 +421,7 @@ export const StoreProvider = ({ children }) => {
             lastSyncTime,
             employees,
             tools,
+            toolsByIdMap,
             transactions,
             outstandingTransactions: realOutstanding,
             addTransaction,

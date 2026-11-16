@@ -62,10 +62,7 @@ function handleRequest(e) {
         result.data = getAllData(payload);
         break;
       case 'GET_FULL_HISTORY':
-        result.data = {
-          transactions: getSheetData(getSpreadsheet(), 'Transactions'),
-          has_full_history: true
-        };
+        result.data = getFullHistoryData();
         break;
       case 'BORROW':
         result.data = addTransaction(payload, 'BORROW');
@@ -87,7 +84,10 @@ function handleRequest(e) {
         result.message = 'Unknown action: ' + action;
     }
 
-    if (lock) SpreadsheetApp.flush();
+    if (lock) {
+      SpreadsheetApp.flush();
+      invalidateDataCache();
+    }
 
   } catch (err) {
     result.status = 'error';
@@ -186,18 +186,128 @@ function computeOutstanding(allTx) {
   return { outstandingList: outstandingList, returnToBorrowMap: returnToBorrowMap };
 }
 
+// --- Cache Helpers (M1) ---
+const DATA_CACHE_TTL_SEC = 60;
+const CACHE_CHUNK_CHARS = 30000; // <= 90 KB even when all characters are 3-byte Thai UTF-8
+const CACHE_MAX_CHUNKS = 80;
+const CACHE_VERSION_PROP = 'DATA_CACHE_VER';
+
+function getCacheVersion() {
+  try {
+    if (typeof PropertiesService === 'undefined') return '1';
+    var props = PropertiesService.getScriptProperties();
+    var ver = props.getProperty(CACHE_VERSION_PROP);
+    if (!ver) {
+      ver = String(Date.now());
+      props.setProperty(CACHE_VERSION_PROP, ver);
+    }
+    return ver;
+  } catch (e) {
+    return '1';
+  }
+}
+
+function invalidateDataCache() {
+  try {
+    if (typeof PropertiesService === 'undefined') return;
+    var nextVer = Date.now() + '_' + Math.floor(Math.random() * 100000);
+    PropertiesService.getScriptProperties().setProperty(CACHE_VERSION_PROP, nextVer);
+  } catch (e) {
+    // Non-fatal: cache expires by TTL
+  }
+}
+
+function getChunkedCache(baseKey) {
+  try {
+    if (typeof CacheService === 'undefined') return null;
+    var cache = CacheService.getScriptCache();
+    var ver = getCacheVersion();
+    var prefix = baseKey + '_v' + ver;
+    var metaStr = cache.get(prefix + '_meta');
+    if (!metaStr) return null;
+
+    var meta = JSON.parse(metaStr);
+    if (!meta || !meta.chunks || meta.chunks <= 0 || meta.chunks > CACHE_MAX_CHUNKS) return null;
+
+    var keys = [];
+    for (var i = 0; i < meta.chunks; i++) {
+      keys.push(prefix + '_c' + i);
+    }
+
+    var valuesByKey = typeof cache.getAll === 'function' ? cache.getAll(keys) : null;
+    var parts = [];
+    for (var j = 0; j < keys.length; j++) {
+      var part = valuesByKey ? valuesByKey[keys[j]] : cache.get(keys[j]);
+      if (part === null || part === undefined) return null;
+      parts.push(part);
+    }
+    return JSON.parse(parts.join(''));
+  } catch (e) {
+    return null;
+  }
+}
+
+function putChunkedCache(baseKey, value) {
+  try {
+    if (typeof CacheService === 'undefined') return false;
+    var cache = CacheService.getScriptCache();
+    var json = JSON.stringify(value);
+    var totalChunks = Math.ceil(json.length / CACHE_CHUNK_CHARS);
+    if (totalChunks <= 0 || totalChunks > CACHE_MAX_CHUNKS) return false;
+
+    var ver = getCacheVersion();
+    var prefix = baseKey + '_v' + ver;
+    var entries = {};
+    for (var i = 0; i < totalChunks; i++) {
+      entries[prefix + '_c' + i] = json.slice(i * CACHE_CHUNK_CHARS, (i + 1) * CACHE_CHUNK_CHARS);
+    }
+    entries[prefix + '_meta'] = JSON.stringify({ chunks: totalChunks });
+
+    if (typeof cache.putAll === 'function') {
+      cache.putAll(entries, DATA_CACHE_TTL_SEC);
+    } else {
+      Object.keys(entries).forEach(function(k) {
+        cache.put(k, entries[k], DATA_CACHE_TTL_SEC);
+      });
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function getFullHistoryData() {
+  var cached = getChunkedCache('full_history');
+  if (cached) return cached;
+
+  var ss = getSpreadsheet();
+  var result = {
+    transactions: getSheetData(ss, 'Transactions'),
+    has_full_history: true
+  };
+  putChunkedCache('full_history', result);
+  return result;
+}
+
 function getAllData(payload) {
+  var wantFull = !!(payload && payload.full_history);
+  var cacheKey = wantFull ? 'all_data_full' : 'all_data_recent';
+  var cached = getChunkedCache(cacheKey);
+  if (cached) return cached;
+
   const ss = getSpreadsheet();
   const employees = getSheetData(ss, 'Employees');
   const tools = getSheetData(ss, 'Tools');
   
-  if (payload && payload.full_history) {
-    return {
+  if (wantFull) {
+    const fullResult = {
       employees: employees,
       tools: tools,
       transactions: getSheetData(ss, 'Transactions'),
       has_full_history: true
     };
+    putChunkedCache(cacheKey, fullResult);
+    return fullResult;
   }
 
   const allTx = getSheetData(ss, 'Transactions');
@@ -247,13 +357,15 @@ function getAllData(payload) {
     }
   }
 
-  return {
+  const recentResult = {
     employees: employees,
     tools: tools,
     transactions: filteredTx,
     total_transactions_count: allTx.length,
     has_full_history: false
   };
+  putChunkedCache(cacheKey, recentResult);
+  return recentResult;
 }
 
 function getSheetData(ss, sheetName) {

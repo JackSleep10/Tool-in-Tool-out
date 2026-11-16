@@ -5,7 +5,7 @@ import { formatThaiDateTime } from '../utils/date';
 import { normalizeId } from '../utils/transactions';
 import './Dashboard.css';
 const Dashboard = () => {
-  const { getStats, outstandingTransactions, tools } = useStore();
+  const { getStats, outstandingTransactions, toolsByIdMap } = useStore();
   const stats = getStats();
 
   // Helper to format date for display
@@ -76,7 +76,7 @@ const Dashboard = () => {
                   <tbody>
                     {outstandingTransactions.map(tx => {
                       const txToolId = normalizeId(tx.tool_id);
-                      const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                      const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
                       const remarkText = String(tx.remark ?? '').trim();
                       return (
                         <tr key={tx.id}>
@@ -118,7 +118,7 @@ const Dashboard = () => {
               <div className="mobile-cards-view">
                 {outstandingTransactions.map(tx => {
                   const txToolId = normalizeId(tx.tool_id);
-                  const loc = txToolId ? tools.find(t => normalizeId(t.id) === txToolId)?.location || '-' : '-';
+                  const loc = (txToolId && toolsByIdMap.get(txToolId)?.location) || '-';
                   const hoursOut = (Date.now() - new Date(tx.date).getTime()) / (1000 * 60 * 60);
                   const isOverdue = hoursOut > 24;
                   const remarkText = String(tx.remark ?? '').trim();
