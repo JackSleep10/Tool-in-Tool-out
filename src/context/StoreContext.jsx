@@ -2,6 +2,11 @@ import { createContext, useContext, useState, useEffect, useMemo, useRef, useCal
 import { fetchFromSheet } from '../services/api';
 import { getTodayDateKey, toBangkokDateKey } from '../utils/date';
 import { computeOutstanding, normalizeId } from '../utils/transactions';
+import {
+    shouldApplySyncResponse,
+    reconcileCommittedTransactions,
+    reconcileCommittedTool
+} from '../utils/storeSync';
 
 const StoreContext = createContext();
 
@@ -52,6 +57,18 @@ export const StoreProvider = ({ children }) => {
     const [hasFullHistory, setHasFullHistory] = useState(false);
     const hasFullHistoryRef = useRef(false);
     const pendingMutationsRef = useRef(0);
+    const syncEpochRef = useRef(0);
+    const dataVersionRef = useRef((() => {
+        try {
+            const hasAllCached =
+                !!localStorage.getItem('gse_cache_tools') &&
+                !!localStorage.getItem('gse_cache_employees') &&
+                !!localStorage.getItem('gse_cache_transactions');
+            return hasAllCached ? (localStorage.getItem('gse_cache_version') || '') : '';
+        } catch (e) {
+            return '';
+        }
+    })());
     const [lastSyncTime, setLastSyncTime] = useState(() => {
         try {
             return localStorage.getItem('gse_cache_timestamp') || null;
@@ -60,6 +77,23 @@ export const StoreProvider = ({ children }) => {
         }
     });
     const lastSyncTimeRef = useRef(lastSyncTime);
+
+    const updateSyncMeta = useCallback((dataVersion) => {
+        const now = Date.now().toString();
+        lastSyncTimeRef.current = now;
+        setLastSyncTime(now);
+        if (dataVersion) {
+            dataVersionRef.current = dataVersion;
+        }
+        try {
+            localStorage.setItem('gse_cache_timestamp', now);
+            if (dataVersion) {
+                localStorage.setItem('gse_cache_version', dataVersion);
+            }
+        } catch (cacheErr) {
+            console.warn('LocalStorage metadata cache error:', cacheErr);
+        }
+    }, []);
 
     const cacheRecentTransactions = useCallback((txList, outstandingList) => {
         try {
@@ -80,17 +114,40 @@ export const StoreProvider = ({ children }) => {
         // M2: avoid overwriting optimistic state while a write mutation is in flight
         if (silent && pendingMutationsRef.current > 0) return;
 
+        const requestEpoch = syncEpochRef.current;
+
         if (!silent) {
             setLoading(true);
         }
         setIsRefreshing(true);
         try {
             const includeFull = hasFullHistoryRef.current;
-            const result = await fetchFromSheet('GET_ALL_DATA', includeFull ? { full_history: true } : {});
-            if (silent && pendingMutationsRef.current > 0) return;
+            const reqPayload = includeFull ? { full_history: true } : {};
+            if (silent && dataVersionRef.current) {
+                reqPayload.client_version = dataVersionRef.current;
+            }
+
+            const result = await fetchFromSheet('GET_ALL_DATA', reqPayload);
+
+            // Discard stale background response if a write started or committed while in flight
+            if (!shouldApplySyncResponse({
+                silent,
+                pendingMutations: pendingMutationsRef.current,
+                requestEpoch,
+                currentEpoch: syncEpochRef.current
+            })) {
+                return;
+            }
 
             if (result && result.status === 'success') {
-                const data = result.data;
+                const data = result.data || {};
+
+                // Version-checked poll short-circuit: nothing changed on server
+                if (data.unchanged) {
+                    updateSyncMeta(data.data_version);
+                    return;
+                }
+
                 const newEmps = data.employees || [];
                 const newTools = data.tools || [];
                 const newTxs = data.transactions || [];
@@ -101,15 +158,12 @@ export const StoreProvider = ({ children }) => {
                 const fullFlag = !!data.has_full_history;
                 hasFullHistoryRef.current = fullFlag;
                 setHasFullHistory(fullFlag);
-                const now = Date.now().toString();
-                lastSyncTimeRef.current = now;
-                setLastSyncTime(now);
+                updateSyncMeta(data.data_version || '');
 
                 // Update LocalStorage cache (M10: keep transactions cached to 30-day + outstanding slice)
                 try {
                     localStorage.setItem('gse_cache_employees', JSON.stringify(newEmps));
                     localStorage.setItem('gse_cache_tools', JSON.stringify(newTools));
-                    localStorage.setItem('gse_cache_timestamp', now);
                 } catch (cacheErr) {
                     console.warn('LocalStorage save error (quota exceeded):', cacheErr);
                 }
@@ -132,7 +186,7 @@ export const StoreProvider = ({ children }) => {
             setLoading(false);
             setIsRefreshing(false);
         }
-    }, [cacheRecentTransactions]);
+    }, [cacheRecentTransactions, updateSyncMeta]);
 
     // Initial Data Load (Background update)
     useEffect(() => {
@@ -175,6 +229,9 @@ export const StoreProvider = ({ children }) => {
                 setTransactions(fullTxs);
                 hasFullHistoryRef.current = true;
                 setHasFullHistory(true);
+                if (result.data.data_version) {
+                    updateSyncMeta(result.data.data_version);
+                }
                 // M10: keep localStorage bounded to 30-day + outstanding slice
                 const { outstandingList } = computeOutstanding(fullTxs);
                 cacheRecentTransactions(fullTxs, outstandingList);
@@ -236,6 +293,7 @@ export const StoreProvider = ({ children }) => {
             status: 'PENDING_SERVER'
         };
 
+        syncEpochRef.current += 1;
         pendingMutationsRef.current += 1;
         let released = false;
         const releaseMutation = () => {
@@ -249,9 +307,22 @@ export const StoreProvider = ({ children }) => {
 
         try {
             const result = await fetchFromSheet(transactionData.action, transactionData);
+            const serverData = result?.data || {};
+            syncEpochRef.current += 1;
+            setTransactions(prev => {
+                const nextTxs = reconcileCommittedTransactions(prev, [tempId], serverData);
+                const { outstandingList } = computeOutstanding(nextTxs);
+                cacheRecentTransactions(nextTxs, outstandingList);
+                return nextTxs;
+            });
+            updateSyncMeta(serverData.data_version);
             releaseMutation();
-            await loadData(true);
-            return result.data;
+
+            // If a legacy server did not return full records, trigger a non-blocking sync
+            if (!serverData.record && !Array.isArray(serverData.records)) {
+                loadData(true);
+            }
+            return serverData;
         } catch (e) {
             setTransactions(prev => prev.filter(tx => tx.id !== tempId));
             console.error('Network Error', e);
@@ -266,9 +337,11 @@ export const StoreProvider = ({ children }) => {
 
         const now = new Date().toISOString();
         const batchNonce = Date.now();
+        const tempIdList = [];
         const tempIds = new Set();
         const optimisticTxs = transactionsArray.map((tx, index) => {
             const tempId = `temp_${batchNonce}_${index}`;
+            tempIdList.push(tempId);
             tempIds.add(tempId);
             return {
                 ...tx,
@@ -278,6 +351,7 @@ export const StoreProvider = ({ children }) => {
             };
         });
 
+        syncEpochRef.current += 1;
         pendingMutationsRef.current += 1;
         let released = false;
         const releaseMutation = () => {
@@ -293,9 +367,22 @@ export const StoreProvider = ({ children }) => {
             const result = await fetchFromSheet('BATCH_TRANSACTIONS', {
                 transactions: transactionsArray
             });
+            const serverData = result?.data || {};
+            syncEpochRef.current += 1;
+            setTransactions(prev => {
+                const nextTxs = reconcileCommittedTransactions(prev, tempIdList, serverData);
+                const { outstandingList } = computeOutstanding(nextTxs);
+                cacheRecentTransactions(nextTxs, outstandingList);
+                return nextTxs;
+            });
+            updateSyncMeta(serverData.data_version);
             releaseMutation();
-            await loadData(true);
-            return result.data;
+
+            // Only fall back to non-blocking background refresh if legacy backend omits records
+            if (!Array.isArray(serverData.records)) {
+                loadData(true);
+            }
+            return serverData;
         } catch (e) {
             setTransactions(prev => prev.filter(tx => !tempIds.has(tx.id)));
             console.error('Batch Network Error', e);
@@ -309,6 +396,7 @@ export const StoreProvider = ({ children }) => {
         let previousTool = null;
         const targetId = normalizeId(toolId);
 
+        syncEpochRef.current += 1;
         pendingMutationsRef.current += 1;
         let released = false;
         const releaseMutation = () => {
@@ -338,9 +426,26 @@ export const StoreProvider = ({ children }) => {
                 reason: reason,
                 marked_by: markedBy
             });
+            const serverData = result?.data || {};
+            syncEpochRef.current += 1;
+            setTools(prev => {
+                const nextTools = serverData.tool_patch
+                    ? reconcileCommittedTool(prev, toolId, serverData.tool_patch)
+                    : prev;
+                try {
+                    localStorage.setItem('gse_cache_tools', JSON.stringify(nextTools));
+                } catch (cacheErr) {
+                    console.warn('LocalStorage tools cache error:', cacheErr);
+                }
+                return nextTools;
+            });
+            updateSyncMeta(serverData.data_version);
             releaseMutation();
-            await loadData(true);
-            return result.data;
+
+            if (!serverData.tool_patch) {
+                loadData(true);
+            }
+            return serverData;
         } catch (e) {
             if (previousTool) {
                 setTools(prev => prev.map(t => (t.id === previousTool.id ? previousTool : t)));
@@ -356,6 +461,7 @@ export const StoreProvider = ({ children }) => {
         let previousTool = null;
         const targetId = normalizeId(toolId);
 
+        syncEpochRef.current += 1;
         pendingMutationsRef.current += 1;
         let released = false;
         const releaseMutation = () => {
@@ -383,9 +489,26 @@ export const StoreProvider = ({ children }) => {
             const result = await fetchFromSheet('MARK_SERVICEABLE', {
                 tool_id: toolId
             });
+            const serverData = result?.data || {};
+            syncEpochRef.current += 1;
+            setTools(prev => {
+                const nextTools = serverData.tool_patch
+                    ? reconcileCommittedTool(prev, toolId, serverData.tool_patch)
+                    : prev;
+                try {
+                    localStorage.setItem('gse_cache_tools', JSON.stringify(nextTools));
+                } catch (cacheErr) {
+                    console.warn('LocalStorage tools cache error:', cacheErr);
+                }
+                return nextTools;
+            });
+            updateSyncMeta(serverData.data_version);
             releaseMutation();
-            await loadData(true);
-            return result.data;
+
+            if (!serverData.tool_patch) {
+                loadData(true);
+            }
+            return serverData;
         } catch (e) {
             if (previousTool) {
                 setTools(prev => prev.map(t => (t.id === previousTool.id ? previousTool : t)));

@@ -66,3 +66,5 @@ npx clasp deploy -i AKfycbwFrI5N6LtVDguJgxs4hNjj7SZE4eg0_yikz11v2TGJqSJtG-ISQy1a
    - คัดลอกฟังก์ชันใน [`tools/sheet_repair.gs`](tools/sheet_repair.gs) ไปวางในไฟล์แยกชั่วคราวใน Apps Script Editor (ไม่ผูกกับ `doGet`/`doPost`)
    - รัน `inspectEmployeesAndTransactions()` และ `reportOrphanToolIds()` (โหมดอ่าน/Dry-Run เท่านั้น) เพื่อดู `Execution log`
    - หากยืนยันว่ามีแถวสลับจริงและสำรอง Sheet แล้ว ค่อยรัน `repairSwappedEmployees(false)`
+4. **เปิดใช้ Keep-Warm Trigger (ทางเลือก — ลด cold start เฉพาะเวลาทำงาน 07:00–19:00 น.):**
+   - เปิด Apps Script Editor → เลือกฟังก์ชัน `setupKeepWarmTrigger` แล้วกด Run 1 ครั้ง (หากต้องการปิด ให้รัน `removeKeepWarmTrigger`)
