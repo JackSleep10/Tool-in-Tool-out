@@ -59,3 +59,42 @@ export function computeOutstanding(transactions) {
 
   return { outstandingList, returnToBorrowMap };
 }
+
+/**
+ * Merge a fresh recent/outstanding transaction slice into an already-loaded full history
+ * without dropping records older than 30 days or duplicating matching IDs.
+ */
+export function mergeRecentTransactions(
+  existingTxs,
+  incomingRecentTxs,
+  cutoffMs = Date.now() - 30 * 24 * 60 * 60 * 1000
+) {
+  const existing = Array.isArray(existingTxs) ? existingTxs : [];
+  const incoming = Array.isArray(incomingRecentTxs) ? incomingRecentTxs : [];
+
+  const incomingIds = new Set();
+  for (let i = 0; i < incoming.length; i++) {
+    const key = normalizeId(incoming[i]?.id);
+    if (key) incomingIds.add(key);
+  }
+
+  const seenOlderIds = new Set();
+  const preservedOlder = [];
+  for (let i = 0; i < existing.length; i++) {
+    const tx = existing[i];
+    if (!tx) continue;
+    const rawId = String(tx.id ?? '');
+    if (rawId.startsWith('temp_')) continue;
+
+    const idKey = normalizeId(rawId);
+    if (idKey && (incomingIds.has(idKey) || seenOlderIds.has(idKey))) continue;
+
+    const ts = tx.date ? new Date(tx.date).getTime() : NaN;
+    if (!Number.isNaN(ts) && ts < cutoffMs) {
+      if (idKey) seenOlderIds.add(idKey);
+      preservedOlder.push(tx);
+    }
+  }
+
+  return [...preservedOlder, ...incoming];
+}

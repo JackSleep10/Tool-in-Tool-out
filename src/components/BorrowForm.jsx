@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { Search, ShoppingBasket, User, MapPin, X, AlertTriangle, QrCode, ShieldAlert } from 'lucide-react';
+import { Search, ShoppingBasket, User, MapPin, X, AlertTriangle, QrCode, ShieldAlert, Loader2 } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
 import { useModal } from '../hooks/useModal';
 import { normalizeId } from '../utils/transactions';
@@ -24,13 +24,17 @@ const BorrowForm = () => {
     const { modal, showModal, closeModal } = useModal();
 
     // Filtering
-    const filteredEmployees = employees.filter(e =>
-        matchSearch(e, empSearch, ['name', 'id', 'department'])
-    ).slice(0, 20);
+    const filteredEmployees = useMemo(() => (
+        employees.filter(e =>
+            matchSearch(e, empSearch, ['name', 'id', 'department'])
+        ).slice(0, 20)
+    ), [employees, empSearch]);
 
-    const filteredTools = tools.filter(t =>
-        matchSearch(t, toolSearch, ['name', 'id', 'location'])
-    ).slice(0, 20);
+    const filteredTools = useMemo(() => (
+        tools.filter(t =>
+            matchSearch(t, toolSearch, ['name', 'id', 'location'])
+        ).slice(0, 20)
+    ), [tools, toolSearch]);
 
     // Handlers
 
@@ -240,6 +244,7 @@ const BorrowForm = () => {
                                 type="text"
                                 placeholder="ค้นหาชื่อ หรือ รหัส..."
                                 value={selectedEmployee ? selectedEmployee.name : empSearch}
+                                disabled={isSubmitting}
                                 onChange={e => {
                                     setEmpSearch(e.target.value);
                                     setSelectedEmployee(null);
@@ -268,6 +273,7 @@ const BorrowForm = () => {
                                 type="text"
                                 placeholder="ค้นหาชื่ออุปกรณ์ หรือ ที่เก็บ... (สแกน QR ได้)"
                                 value={toolSearch}
+                                disabled={isSubmitting}
                                 onChange={e => setToolSearch(e.target.value)}
                                 onKeyDown={handleToolKeyDown}
                             />
@@ -275,6 +281,7 @@ const BorrowForm = () => {
                                 type="button"
                                 className="scan-btn-inline"
                                 onClick={startScanning}
+                                disabled={isSubmitting}
                                 title="สแกน QR Code"
                                 aria-label="เปิดกล้องสแกน QR Code อุปกรณ์"
                             >
@@ -359,6 +366,7 @@ const BorrowForm = () => {
                                         type="button"
                                         onClick={() => removeFromBasket(item.id)}
                                         className="remove-btn"
+                                        disabled={isSubmitting}
                                         aria-label={`นำ ${item.name || item.id} ออกจากตะกร้า`}
                                     >
                                         <X size={16} />
@@ -370,7 +378,12 @@ const BorrowForm = () => {
 
                     <div className="action-area">
                         <button className="submit-btn" onClick={handleSubmit} disabled={isSubmitting}>
-                            {isSubmitting ? 'กำลังบันทึก...' : 'บันทึกการยืม'}
+                            {isSubmitting ? (
+                                <>
+                                    <Loader2 size={18} className="spin-icon" />
+                                    กำลังบันทึก...
+                                </>
+                            ) : 'บันทึกการยืม'}
                         </button>
                     </div>
                 </div>

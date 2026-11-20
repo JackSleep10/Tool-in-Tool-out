@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
-import { Search, RotateCcw, CheckSquare, Square, UserCheck, QrCode, X } from 'lucide-react';
+import { Search, RotateCcw, CheckSquare, Square, UserCheck, QrCode, X, Loader2 } from 'lucide-react';
 import { useQrScanner } from '../hooks/useQrScanner';
 import { useModal } from '../hooks/useModal';
 import { normalizeId } from '../utils/transactions';
@@ -237,7 +237,7 @@ const ReturnForm = () => {
                     <div className="batch-action-bar">
                         <div className="selection-info">เลือกแล้ว {selectedIds.length} รายการ</div>
                         <button type="button" className="batch-btn primary" onClick={handleReturnSelected} disabled={isSubmitting}>
-                            <RotateCcw size={18} />
+                            {isSubmitting ? <Loader2 size={18} className="spin-icon" /> : <RotateCcw size={18} />}
                             {isSubmitting ? 'กำลังบันทึก...' : 'รับคืนทั้งหมดที่เลือก'}
                         </button>
                     </div>

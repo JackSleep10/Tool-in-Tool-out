@@ -25,27 +25,12 @@ function doPost(e) {
 const WRITE_ACTIONS = ['BORROW', 'RETURN', 'BATCH_TRANSACTIONS', 'MARK_UNSERVICEABLE', 'MARK_SERVICEABLE'];
 const LOCK_TIMEOUT_MS = 20000;
 
-function handleRequest(e) {
-  // Note: Google Apps Script handles CORS automatically for Web Apps
-
-  // Handle Options request (Preflight)
-  if (e.parameter && e.parameter.method === "OPTIONS") {
-     return ContentService.createTextOutput("").setMimeType(ContentService.MimeType.TEXT);
-  }
-
+function processRequest(action, payload) {
   var result = { status: 'success', data: null };
   var lock = null;
+  var reqPayload = payload || {};
 
   try {
-    // Parse Payload
-    var action = e.parameter.action;
-    var payload = {};
-    if (e.postData && e.postData.contents) {
-      var data = JSON.parse(e.postData.contents);
-      action = data.action || action;
-      payload = data;
-    }
-
     if (WRITE_ACTIONS.indexOf(action) !== -1) {
       lock = LockService.getScriptLock();
       if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
@@ -59,33 +44,41 @@ function handleRequest(e) {
     // manually from the Apps Script editor.
     switch (action) {
       case 'GET_ALL_DATA':
-        result.data = getAllData(payload);
+        result.data = getAllData(reqPayload);
         break;
       case 'GET_FULL_HISTORY':
         result.data = getFullHistoryData();
         break;
       case 'BORROW':
-        result.data = addTransaction(payload, 'BORROW');
+        result.data = addTransaction(reqPayload, 'BORROW');
         break;
       case 'RETURN':
-        result.data = addTransaction(payload, 'RETURN');
+        result.data = addTransaction(reqPayload, 'RETURN');
         break;
       case 'BATCH_TRANSACTIONS':
-        result.data = addBatchTransactions(payload.transactions);
+        result.data = addBatchTransactions(reqPayload.transactions);
         break;
       case 'MARK_UNSERVICEABLE':
-        result.data = markToolServiceability(payload, 'UNSERVICEABLE');
+        result.data = markToolServiceability(reqPayload, 'UNSERVICEABLE');
         break;
       case 'MARK_SERVICEABLE':
-        result.data = markToolServiceability(payload, 'SERVICEABLE');
+        result.data = markToolServiceability(reqPayload, 'SERVICEABLE');
         break;
       default:
         result.status = 'error';
         result.message = 'Unknown action: ' + action;
     }
 
-    if (lock) {
-      SpreadsheetApp.flush();
+    if (lock && result.status === 'success') {
+      try {
+        SpreadsheetApp.flush();
+      } catch (flushErr) {
+        clearOutstandingStateCache();
+        throw flushErr;
+      }
+      if (action === 'MARK_UNSERVICEABLE' || action === 'MARK_SERVICEABLE') {
+        invalidateToolsCache();
+      }
       invalidateDataCache();
     }
 
@@ -97,9 +90,46 @@ function handleRequest(e) {
     if (lock) lock.releaseLock();
   }
 
+  return result;
+}
+
+function handleRequest(e) {
+  // Note: Google Apps Script handles CORS automatically for Web Apps
+
+  // Handle Options request (Preflight)
+  if (e && e.parameter && e.parameter.method === "OPTIONS") {
+     return ContentService.createTextOutput("").setMimeType(ContentService.MimeType.TEXT);
+  }
+
+  var result;
+  try {
+    // Parse Payload
+    var action = (e && e.parameter) ? e.parameter.action : '';
+    var payload = {};
+    if (e && e.postData && e.postData.contents) {
+      var data = JSON.parse(e.postData.contents);
+      action = data.action || action;
+      payload = data;
+    }
+
+    result = processRequest(action, payload);
+  } catch (err) {
+    result = {
+      status: 'error',
+      data: null,
+      message: (err && err.message) ? err.message : String(err)
+    };
+  }
+
   // Return JSON
   return ContentService.createTextOutput(JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Direct RPC entry point for google.script.run (avoids HTTP POST -> 302 redirect overhead).
+// Returns a JSON string to preserve ISO date formatting and match doPost response schema.
+function apiRequest(action, payload) {
+  return JSON.stringify(processRequest(action, payload || {}));
 }
 
 // --- Database Helpers ---
@@ -126,6 +156,32 @@ function sanitizeCell(value) {
     return "'" + value;
   }
   return value;
+}
+
+/**
+ * Find the matching outstanding BORROW index for a RETURN transaction.
+ * Matches by linked_borrow_id first, then falls back to FIFO by (tool_id, employee_id).
+ */
+function findBorrowMatchIndex(outstandingList, tx) {
+  const linkedId = normalizeId(tx.linked_borrow_id);
+  let idx = -1;
+
+  if (linkedId && linkedId !== '-') {
+    idx = outstandingList.findIndex(function(item) {
+      const itemId = normalizeId(item.id);
+      return itemId !== '' && itemId === linkedId;
+    });
+  }
+
+  if (idx === -1) {
+    const toolId = normalizeId(tx.tool_id);
+    const empId = normalizeId(tx.employee_id);
+    idx = outstandingList.findIndex(function(item) {
+      return normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId;
+    });
+  }
+
+  return idx;
 }
 
 /**
@@ -156,23 +212,7 @@ function computeOutstanding(allTx) {
     if (tx.action === 'BORROW') {
       outstandingList.push(tx);
     } else if (tx.action === 'RETURN') {
-      const linkedId = normalizeId(tx.linked_borrow_id);
-      let idx = -1;
-
-      if (linkedId && linkedId !== '-') {
-        idx = outstandingList.findIndex(function(item) {
-          const itemId = normalizeId(item.id);
-          return itemId !== '' && itemId === linkedId;
-        });
-      }
-
-      if (idx === -1) {
-        const toolId = normalizeId(tx.tool_id);
-        const empId = normalizeId(tx.employee_id);
-        idx = outstandingList.findIndex(function(item) {
-          return normalizeId(item.tool_id) === toolId && normalizeId(item.employee_id) === empId;
-        });
-      }
+      const idx = findBorrowMatchIndex(outstandingList, tx);
 
       if (idx !== -1) {
         const matchedBorrow = outstandingList.splice(idx, 1)[0];
@@ -186,20 +226,23 @@ function computeOutstanding(allTx) {
   return { outstandingList: outstandingList, returnToBorrowMap: returnToBorrowMap };
 }
 
-// --- Cache Helpers (M1) ---
+// --- Cache Helpers (M1 & O(1) Guard Caches) ---
 const DATA_CACHE_TTL_SEC = 60;
+const GUARD_CACHE_TTL_SEC = 300;
 const CACHE_CHUNK_CHARS = 30000; // <= 90 KB even when all characters are 3-byte Thai UTF-8
-const CACHE_MAX_CHUNKS = 80;
+const CACHE_MAX_CHUNKS = 200;
 const CACHE_VERSION_PROP = 'DATA_CACHE_VER';
+const TOOLS_CACHE_VER_PROP = 'TOOLS_CACHE_VER';
+const OUTSTANDING_STATE_KEY = 'outstanding_state_v1';
 
-function getCacheVersion() {
+function getVersionedProp(propName) {
   try {
     if (typeof PropertiesService === 'undefined') return '1';
     var props = PropertiesService.getScriptProperties();
-    var ver = props.getProperty(CACHE_VERSION_PROP);
+    var ver = props.getProperty(propName);
     if (!ver) {
       ver = String(Date.now());
-      props.setProperty(CACHE_VERSION_PROP, ver);
+      props.setProperty(propName, ver);
     }
     return ver;
   } catch (e) {
@@ -207,14 +250,209 @@ function getCacheVersion() {
   }
 }
 
-function invalidateDataCache() {
+function bumpVersionedProp(propName) {
   try {
     if (typeof PropertiesService === 'undefined') return;
     var nextVer = Date.now() + '_' + Math.floor(Math.random() * 100000);
-    PropertiesService.getScriptProperties().setProperty(CACHE_VERSION_PROP, nextVer);
+    PropertiesService.getScriptProperties().setProperty(propName, nextVer);
   } catch (e) {
     // Non-fatal: cache expires by TTL
   }
+}
+
+function getCacheVersion() {
+  return getVersionedProp(CACHE_VERSION_PROP);
+}
+
+function invalidateDataCache() {
+  bumpVersionedProp(CACHE_VERSION_PROP);
+}
+
+function getToolsCacheVersion() {
+  return getVersionedProp(TOOLS_CACHE_VER_PROP);
+}
+
+function invalidateToolsCache() {
+  bumpVersionedProp(TOOLS_CACHE_VER_PROP);
+}
+
+function buildUnserviceableMapFromToolsList(tools) {
+  var usMap = {};
+  if (!tools || !tools.length) return usMap;
+  for (var i = 0; i < tools.length; i++) {
+    var t = tools[i];
+    if (!t) continue;
+    var tid = normalizeId(t.id);
+    var stat = (t.serviceability_status || '').toString().toUpperCase().trim();
+    if (tid && stat === 'UNSERVICEABLE') {
+      usMap[tid] = true;
+    }
+  }
+  return usMap;
+}
+
+function saveUnserviceableMapCache(usMap, ver) {
+  try {
+    if (typeof CacheService === 'undefined') return;
+    var cacheVer = ver || getToolsCacheVersion();
+    CacheService.getScriptCache().put('us_map_v' + cacheVer, JSON.stringify(usMap || {}), GUARD_CACHE_TTL_SEC);
+  } catch (e) {
+    // Non-fatal: next request rebuilds from Tools sheet
+  }
+}
+
+function getUnserviceableMap(ss) {
+  var ver = getToolsCacheVersion();
+  var cacheKey = 'us_map_v' + ver;
+  try {
+    if (typeof CacheService !== 'undefined') {
+      var cachedStr = CacheService.getScriptCache().get(cacheKey);
+      if (cachedStr) {
+        var parsed = JSON.parse(cachedStr);
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
+        }
+      }
+    }
+  } catch (e) {
+    // Fall through to sheet read
+  }
+
+  var usMap = {};
+  var toolsSheet = ss.getSheetByName('Tools');
+  if (toolsSheet) {
+    var toolsData = toolsSheet.getDataRange().getValues();
+    if (toolsData.length > 0) {
+      var tHeaders = toolsData[0].map(function(h) {
+        return (h === null || h === undefined ? '' : h).toString().trim().toLowerCase();
+      });
+      var idCol = tHeaders.indexOf('id');
+      var statCol = tHeaders.indexOf('serviceability_status');
+      if (idCol !== -1 && statCol !== -1) {
+        for (var i = 1; i < toolsData.length; i++) {
+          var tid = normalizeId(toolsData[i][idCol]);
+          var stat = (toolsData[i][statCol] || '').toString().toUpperCase().trim();
+          if (tid && stat === 'UNSERVICEABLE') {
+            usMap[tid] = true;
+          }
+        }
+      }
+    }
+  }
+  saveUnserviceableMapCache(usMap, ver);
+  return usMap;
+}
+
+function toMinimalOutstandingItem(tx) {
+  var d = '';
+  if (tx && tx.date) {
+    d = tx.date instanceof Date ? tx.date.toISOString() : String(tx.date);
+  }
+  return {
+    id: tx && tx.id !== undefined && tx.id !== null ? String(tx.id) : '',
+    date: d,
+    action: 'BORROW',
+    tool_id: tx && tx.tool_id !== undefined && tx.tool_id !== null ? tx.tool_id : '',
+    tool_name: tx && tx.tool_name !== undefined && tx.tool_name !== null ? tx.tool_name : '',
+    employee_id: tx && tx.employee_id !== undefined && tx.employee_id !== null ? tx.employee_id : '',
+    employee_name: tx && tx.employee_name !== undefined && tx.employee_name !== null ? tx.employee_name : ''
+  };
+}
+
+function readTransactionsWatermark(txSheet) {
+  var lastRow = txSheet.getLastRow();
+  var lastRowId = '';
+  if (lastRow > 1) {
+    var val = txSheet.getRange(lastRow, 1).getValue();
+    lastRowId = (val === null || val === undefined ? '' : val).toString().trim();
+  }
+  return { lastRow: lastRow, lastRowId: lastRowId };
+}
+
+function clearOutstandingStateCache() {
+  try {
+    if (typeof CacheService === 'undefined') return;
+    var cache = CacheService.getScriptCache();
+    if (typeof cache.remove === 'function') {
+      cache.remove(OUTSTANDING_STATE_KEY);
+    }
+  } catch (e) {
+    // Non-fatal
+  }
+}
+
+function getCachedOutstandingState(watermark) {
+  try {
+    if (typeof CacheService === 'undefined') return null;
+    var raw = CacheService.getScriptCache().get(OUTSTANDING_STATE_KEY);
+    if (!raw) return null;
+    var parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed.lastRow !== 'number' ||
+      parsed.lastRow !== watermark.lastRow ||
+      String(parsed.lastRowId || '') !== String(watermark.lastRowId || '') ||
+      !Array.isArray(parsed.outstandingList)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveOutstandingState(lastRow, lastRowId, outstandingList) {
+  try {
+    if (typeof CacheService === 'undefined') return false;
+    var minimal = [];
+    for (var i = 0; i < outstandingList.length; i++) {
+      minimal.push(toMinimalOutstandingItem(outstandingList[i]));
+    }
+    var payload = JSON.stringify({
+      lastRow: lastRow,
+      lastRowId: (lastRowId === null || lastRowId === undefined ? '' : lastRowId).toString().trim(),
+      outstandingList: minimal
+    });
+    CacheService.getScriptCache().put(OUTSTANDING_STATE_KEY, payload, GUARD_CACHE_TTL_SEC);
+    return true;
+  } catch (e) {
+    clearOutstandingStateCache();
+    return false;
+  }
+}
+
+/**
+ * Validate and apply a batch of transactions onto an outstanding BORROW list.
+ * Allows RETURN-then-BORROW in one batch while blocking duplicate borrows.
+ */
+function applyTransactionsToOutstanding(baseOutstandingList, txBatch) {
+  var list = (baseOutstandingList || []).slice();
+  for (var k = 0; k < txBatch.length; k++) {
+    var t = txBatch[k];
+    if (!t) continue;
+    if (t.action === 'RETURN') {
+      var idx = findBorrowMatchIndex(list, t);
+      if (idx !== -1) {
+        list.splice(idx, 1);
+      }
+    } else if (t.action === 'BORROW') {
+      var key = normalizeId(t.tool_id);
+      var existing = null;
+      for (var m = 0; m < list.length; m++) {
+        if (normalizeId(list[m].tool_id) === key) {
+          existing = list[m];
+          break;
+        }
+      }
+      if (existing) {
+        throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" ถูกยืมอยู่แล้วโดย ' +
+          (existing.employee_name || '') + ' (' + (existing.employee_id || '') + ')');
+      }
+      list.push(toMinimalOutstandingItem(t));
+    }
+  }
+  return list;
 }
 
 function getChunkedCache(baseKey) {
@@ -234,10 +472,23 @@ function getChunkedCache(baseKey) {
       keys.push(prefix + '_c' + i);
     }
 
-    var valuesByKey = typeof cache.getAll === 'function' ? cache.getAll(keys) : null;
+    var valuesByKey = {};
+    if (typeof cache.getAll === 'function') {
+      for (var g = 0; g < keys.length; g += 25) {
+        var batchKeys = keys.slice(g, g + 25);
+        var batchRes = cache.getAll(batchKeys);
+        if (batchRes) {
+          for (var bk in batchRes) {
+            if (Object.prototype.hasOwnProperty.call(batchRes, bk)) {
+              valuesByKey[bk] = batchRes[bk];
+            }
+          }
+        }
+      }
+    }
     var parts = [];
     for (var j = 0; j < keys.length; j++) {
-      var part = valuesByKey ? valuesByKey[keys[j]] : cache.get(keys[j]);
+      var part = typeof cache.getAll === 'function' ? valuesByKey[keys[j]] : cache.get(keys[j]);
       if (part === null || part === undefined) return null;
       parts.push(part);
     }
@@ -257,16 +508,29 @@ function putChunkedCache(baseKey, value) {
 
     var ver = getCacheVersion();
     var prefix = baseKey + '_v' + ver;
+    var allKeys = [];
     var entries = {};
     for (var i = 0; i < totalChunks; i++) {
-      entries[prefix + '_c' + i] = json.slice(i * CACHE_CHUNK_CHARS, (i + 1) * CACHE_CHUNK_CHARS);
+      var chunkKey = prefix + '_c' + i;
+      entries[chunkKey] = json.slice(i * CACHE_CHUNK_CHARS, (i + 1) * CACHE_CHUNK_CHARS);
+      allKeys.push(chunkKey);
     }
-    entries[prefix + '_meta'] = JSON.stringify({ chunks: totalChunks });
+    var metaKey = prefix + '_meta';
+    entries[metaKey] = JSON.stringify({ chunks: totalChunks });
+    allKeys.push(metaKey);
 
     if (typeof cache.putAll === 'function') {
-      cache.putAll(entries, DATA_CACHE_TTL_SEC);
+      for (var p = 0; p < allKeys.length; p += 25) {
+        var batch = {};
+        var end = Math.min(p + 25, allKeys.length);
+        for (var idx = p; idx < end; idx++) {
+          var k = allKeys[idx];
+          batch[k] = entries[k];
+        }
+        cache.putAll(batch, DATA_CACHE_TTL_SEC);
+      }
     } else {
-      Object.keys(entries).forEach(function(k) {
+      allKeys.forEach(function(k) {
         cache.put(k, entries[k], DATA_CACHE_TTL_SEC);
       });
     }
@@ -280,12 +544,15 @@ function getFullHistoryData() {
   var cached = getChunkedCache('full_history');
   if (cached) return cached;
 
+  var verBefore = getCacheVersion();
   var ss = getSpreadsheet();
   var result = {
     transactions: getSheetData(ss, 'Transactions'),
     has_full_history: true
   };
-  putChunkedCache('full_history', result);
+  if (getCacheVersion() === verBefore) {
+    putChunkedCache('full_history', result);
+  }
   return result;
 }
 
@@ -295,10 +562,16 @@ function getAllData(payload) {
   var cached = getChunkedCache(cacheKey);
   if (cached) return cached;
 
+  var verBefore = getCacheVersion();
+  var toolsVerBefore = getToolsCacheVersion();
   const ss = getSpreadsheet();
   const employees = getSheetData(ss, 'Employees');
   const tools = getSheetData(ss, 'Tools');
-  
+
+  if (getToolsCacheVersion() === toolsVerBefore) {
+    saveUnserviceableMapCache(buildUnserviceableMapFromToolsList(tools), toolsVerBefore);
+  }
+
   if (wantFull) {
     const fullResult = {
       employees: employees,
@@ -306,16 +579,27 @@ function getAllData(payload) {
       transactions: getSheetData(ss, 'Transactions'),
       has_full_history: true
     };
-    putChunkedCache(cacheKey, fullResult);
+    if (getCacheVersion() === verBefore) {
+      putChunkedCache(cacheKey, fullResult);
+    }
     return fullResult;
   }
 
+  const txSheet = ss.getSheetByName('Transactions');
   const allTx = getSheetData(ss, 'Transactions');
-  
+
   // Replay FIFO / linked_borrow_id to match returns with borrows
   const replay = computeOutstanding(allTx);
   const outstandingList = replay.outstandingList;
   const returnToBorrowMap = replay.returnToBorrowMap;
+
+  if (getCacheVersion() === verBefore && txSheet) {
+    var lastRow = txSheet.getLastRow();
+    if (lastRow === allTx.length + 1 || (lastRow <= 1 && allTx.length === 0)) {
+      var lastId = allTx.length > 0 ? allTx[allTx.length - 1].id : '';
+      saveOutstandingState(lastRow, lastId, outstandingList);
+    }
+  }
 
   const outstandingIds = {};
   for (let j = 0; j < outstandingList.length; j++) {
@@ -364,44 +648,57 @@ function getAllData(payload) {
     total_transactions_count: allTx.length,
     has_full_history: false
   };
-  putChunkedCache(cacheKey, recentResult);
+  if (getCacheVersion() === verBefore) {
+    putChunkedCache(cacheKey, recentResult);
+  }
   return recentResult;
 }
 
 function getSheetData(ss, sheetName) {
   const sheet = ss.getSheetByName(sheetName);
   if (!sheet) return [];
-  
+
   const data = sheet.getDataRange().getValues();
   if (!data || data.length === 0) return [];
-  const headers = data[0];
-  const rows = data.slice(1);
-  
-  return rows.map(row => {
-    let obj = {};
-    headers.forEach((h, i) => {
-      const key = (h === null || h === undefined ? '' : h).toString().trim().toLowerCase();
-      if (key) obj[key] = row[i];
-    });
-    return obj;
-  });
+  const rawHeaders = data[0];
+  const keys = [];
+  for (var c = 0; c < rawHeaders.length; c++) {
+    var h = rawHeaders[c];
+    keys.push((h === null || h === undefined ? '' : h).toString().trim().toLowerCase());
+  }
+
+  const result = [];
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    var obj = {};
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      if (key) {
+        var val = row[i];
+        obj[key] = val instanceof Date ? val.toISOString() : val;
+      }
+    }
+    result.push(obj);
+  }
+  return result;
 }
 
 function addTransaction(data, type) {
   // Single transactions go through the same validated batch path.
   const tx = Object.assign({}, data, { action: type });
   const res = addBatchTransactions([tx]);
-  return { status: 'recorded', id: res.ids[0] };
+  return { status: 'recorded', id: res.ids[0], transaction: res.transactions[0] };
 }
 
 function addBatchTransactions(transactions) {
   if (!transactions || !transactions.length) throw new Error('No transactions');
-  
+
   const ss = getSpreadsheet();
   const sheet = ss.getSheetByName('Transactions');
   if (!sheet) throw new Error('Transactions sheet not found');
   const results = [];
   const rows = [];
+  const recordedTxs = [];
 
   // Basic validation
   for (let v = 0; v < transactions.length; v++) {
@@ -412,83 +709,92 @@ function addBatchTransactions(transactions) {
     if (!normalizeId(t.tool_id)) throw new Error('tool_id is required');
     if (!normalizeId(t.employee_id)) throw new Error('employee_id is required');
   }
-  
-  // Guard: Check if any BORROW item is UNSERVICEABLE
-  const toolsSheet = ss.getSheetByName('Tools');
-  if (toolsSheet) {
-    const toolsData = toolsSheet.getDataRange().getValues();
-    if (toolsData.length > 0) {
-      const tHeaders = toolsData[0].map(h => (h === null || h === undefined ? '' : h).toString().trim().toLowerCase());
-      const idCol = tHeaders.indexOf('id');
-      const statCol = tHeaders.indexOf('serviceability_status');
-      if (idCol !== -1 && statCol !== -1) {
-        const usMap = {};
-        for (let i = 1; i < toolsData.length; i++) {
-          const tid = normalizeId(toolsData[i][idCol]);
-          const stat = (toolsData[i][statCol] || '').toString().toUpperCase().trim();
-          if (stat === 'UNSERVICEABLE') usMap[tid] = true;
-        }
-        for (let j = 0; j < transactions.length; j++) {
-          const t = transactions[j];
-          if (t.action === 'BORROW' && usMap[normalizeId(t.tool_id)]) {
-            throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้');
-          }
-        }
+
+  const hasBorrow = transactions.some(function(t) { return t.action === 'BORROW'; });
+
+  // Guard 1: Check UNSERVICEABLE tools (only needed when borrowing; RETURN-only skips Tools sheet)
+  if (hasBorrow) {
+    const usMap = getUnserviceableMap(ss);
+    for (let j = 0; j < transactions.length; j++) {
+      const t = transactions[j];
+      if (t.action === 'BORROW' && usMap[normalizeId(t.tool_id)]) {
+        throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" อยู่ในสถานะชำรุด (U/S) ไม่สามารถเบิกได้');
       }
     }
   }
 
-  // Guard: a tool that is still borrowed cannot be borrowed again.
-  // Runs under the script lock (see handleRequest), so this check is race-free.
-  const hasBorrow = transactions.some(t => t.action === 'BORROW');
-  if (hasBorrow) {
-    const replay = computeOutstanding(getSheetData(ss, 'Transactions'));
-    const outByTool = {};
-    replay.outstandingList.forEach(function(b) {
-      outByTool[normalizeId(b.tool_id)] = b;
-    });
-    // Apply this batch in order so RETURN-then-BORROW in one batch is allowed.
-    for (let k = 0; k < transactions.length; k++) {
-      const t = transactions[k];
-      const key = normalizeId(t.tool_id);
-      if (t.action === 'RETURN') {
-        delete outByTool[key];
-      } else {
-        const existing = outByTool[key];
-        if (existing) {
-          throw new Error('อุปกรณ์ "' + (t.tool_name || t.tool_id) + '" ถูกยืมอยู่แล้วโดย ' +
-            (existing.employee_name || '') + ' (' + (existing.employee_id || '') + ')');
-        }
-        outByTool[key] = t;
-      }
-    }
-  }
-  
+  const nowDate = new Date();
+  const nowIso = nowDate.toISOString();
+
   transactions.forEach((data) => {
     const uuid = Utilities.getUuid();
+    const sToolId = sanitizeCell(data.tool_id);
+    const sToolName = sanitizeCell(data.tool_name);
+    const sEmpId = sanitizeCell(data.employee_id);
+    const sEmpName = sanitizeCell(data.employee_name);
+    const qty = data.quantity || 1;
+    const sIssuer = sanitizeCell(data.staff_issuer || '-');
+    const sReceiver = sanitizeCell(data.staff_receiver || '-');
+    const sLinked = sanitizeCell(data.linked_borrow_id || '-');
+    const sRemark = sanitizeCell(data.remark || '-');
+
     const newRow = [
-      uuid,                // id
-      new Date(),          // date
-      data.action,         // action
-      sanitizeCell(data.tool_id),
-      sanitizeCell(data.tool_name),
-      sanitizeCell(data.employee_id),
-      sanitizeCell(data.employee_name),
-      data.quantity || 1,
-      sanitizeCell(data.staff_issuer || '-'),
-      sanitizeCell(data.staff_receiver || '-'),
-      sanitizeCell(data.linked_borrow_id || '-'),
-      sanitizeCell(data.remark || '-')
+      uuid,           // id
+      nowDate,        // date
+      data.action,    // action
+      sToolId,
+      sToolName,
+      sEmpId,
+      sEmpName,
+      qty,
+      sIssuer,
+      sReceiver,
+      sLinked,
+      sRemark
     ];
     rows.push(newRow);
     results.push(uuid);
+    recordedTxs.push({
+      id: uuid,
+      date: nowIso,
+      action: data.action,
+      tool_id: sToolId,
+      tool_name: sToolName,
+      employee_id: sEmpId,
+      employee_name: sEmpName,
+      quantity: qty,
+      staff_issuer: sIssuer,
+      staff_receiver: sReceiver,
+      linked_borrow_id: sLinked,
+      remark: sRemark
+    });
   });
-  
+
+  // Guard 2: a tool that is still borrowed cannot be borrowed again.
+  // Runs under ScriptLock (see processRequest) using O(1) watermark-verified cache with full-sheet fallback.
+  const watermark = readTransactionsWatermark(sheet);
+  const cachedState = getCachedOutstandingState(watermark);
+  let nextOutstandingList = null;
+
+  if (hasBorrow) {
+    const baseList = cachedState
+      ? cachedState.outstandingList
+      : computeOutstanding(getSheetData(ss, 'Transactions')).outstandingList;
+    nextOutstandingList = applyTransactionsToOutstanding(baseList, recordedTxs);
+  } else if (cachedState) {
+    nextOutstandingList = applyTransactionsToOutstanding(cachedState.outstandingList, recordedTxs);
+  }
+
   // Append all rows at once using getRange & setValues
-  const lastRow = sheet.getLastRow();
-  sheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
-  
-  return { status: 'batch_recorded', count: transactions.length, ids: results };
+  sheet.getRange(watermark.lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+
+  if (nextOutstandingList !== null) {
+    saveOutstandingState(watermark.lastRow + rows.length, results[results.length - 1], nextOutstandingList);
+  } else {
+    clearOutstandingStateCache();
+  }
+
+  return { status: 'batch_recorded', count: transactions.length, ids: results, transactions: recordedTxs };
 }
 
 function markToolServiceability(data, status, _retry) {
@@ -537,10 +843,21 @@ function markToolServiceability(data, status, _retry) {
 
   if (rowIndex === -1) throw new Error('Tool not found: ' + data.tool_id);
 
+  const nowDate = new Date();
+  const nowIso = nowDate.toISOString();
+  const cleanReason = status === 'UNSERVICEABLE' ? sanitizeCell(data.reason || '') : '';
+  const cleanBy = status === 'UNSERVICEABLE' ? sanitizeCell(data.marked_by || '') : '';
   const values = status === 'UNSERVICEABLE'
-    ? ['UNSERVICEABLE', sanitizeCell(data.reason || ''), new Date(), sanitizeCell(data.marked_by || '')]
+    ? ['UNSERVICEABLE', cleanReason, nowDate, cleanBy]
     : ['SERVICEABLE', '', '', ''];
   sheet.getRange(rowIndex, statusCol + 1, 1, 4).setValues([values]);
 
-  return { status: 'updated', tool_id: data.tool_id };
+  return {
+    status: 'updated',
+    tool_id: data.tool_id,
+    serviceability_status: status,
+    unserviceable_reason: cleanReason,
+    unserviceable_date: status === 'UNSERVICEABLE' ? nowIso : '',
+    unserviceable_by: cleanBy
+  };
 }
