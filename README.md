@@ -32,6 +32,10 @@ npm run lint       # ตรวจสอบโค้ดด้วย ESLint (--max
 
 > โปรเจกต์นี้ใช้ `vite-plugin-singlefile` (`minify: true`) เพื่อรวม Frontend ทั้งหมดเป็นไฟล์เดียวที่ `dist/index.html` ซึ่งต้องคัดลอกไปทับ `gas/index.html` ก่อน `clasp push` เสมอ
 
+> [!IMPORTANT]
+> **`clasp push` อย่างเดียวอัปเดตเฉพาะ `@HEAD` (`/dev`) เท่านั้น — ไม่ได้อัปเดตลิงก์ใช้งานจริง (`/exec`)**
+> ทุกครั้งที่แก้ไขโค้ดเพื่อใช้งานจริง ต้องรันทั้ง `clasp push` **และ** `clasp deploy -i AKfycbwFrI5N6LtVDguJgxs4hNjj7SZE4eg0_yikz11v2TGJqSJtG-ISQy1anJEOLMAYs8rM -d "<Release description>"` ต่อเนื่องกันเสมอ (ดูข้อ 7 ใน [SKILL.md](SKILL.md))
+
 ### Windows (CMD)
 
 ```cmd

@@ -44,5 +44,14 @@
   - ช่วยแนะนำการจัดระเบียบไฟล์โฟลเดอร์ให้เป็นหมวดหมู่
   - สรุปโครงสร้างข้อมูลหรือไฟล์ให้อ่านเข้าใจง่าย
 
+## 7. GAS Deployment Rule (กฎการ Deploy ขึ้น Google Apps Script)
+- **กฎบังคับ:** ทุกครั้งที่แก้โค้ด Frontend (`src/`) หรือ Backend (`gas/`) เพื่อใช้งานจริง หรือเมื่อผู้ใช้สั่ง push/อัปเดต GAS **ห้ามหยุดแค่ `clasp push` เพียงอย่างเดียว** เพราะ `clasp push` อัปเดตแค่ `@HEAD` (`/dev`) ไม่ได้อัปเดตลิงก์ Production (`/exec`)
+- **ขั้นตอนที่ต้องทำครบต่อเนื่องกันเสมอ (บน Windows ใช้ `node` รัน CLI ตาม [README.md](README.md)):**
+  1. Build Frontend: `node "node_modules/vite/bin/vite.js" build`
+  2. คัดลอก bundle: `Copy-Item -Force "dist\index.html" "gas\index.html"`
+  3. Push โค้ดขึ้น GAS: `node "node_modules/@google/clasp/build/src/index.js" push`
+  4. **Deploy ทับ Deployment ID ใช้งานจริงทันที** (เว้นแต่ผู้ใช้สั่งชัดเจนให้ push แค่ `@HEAD`):
+     `node "node_modules/@google/clasp/build/src/index.js" deploy -i AKfycbwFrI5N6LtVDguJgxs4hNjj7SZE4eg0_yikz11v2TGJqSJtG-ISQy1anJEOLMAYs8rM -d "<Release description>"`
+
 ---
 *หมายเหตุ: เนื่องจากคลังของ `awesome-claude-skills` มีทักษะมากกว่า 1,000 รูปแบบ การดึงมาทั้งหมดจะทำให้ล้นหน่วยความจำ (Context window) ไฟล์นี้จึงสรุปเฉพาะแกนหลัก (Core Skills) ที่ตอบโจทย์การเขียนเว็บแอปพลิเคชันของคุณมากที่สุด หากต้องการเพิ่ม Skill เฉพาะทางอื่นๆ สามารถระบุเพิ่มในไฟล์นี้ได้เลย!*
